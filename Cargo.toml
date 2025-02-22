@@ -1,0 +1,28 @@
+[package]
+name = "adb-daemon-rs"
+version = "0.1.0"
+edition = "2024"
+
+[workspace]
+members = ["packages/transport"]
+
+[dependencies]
+adb-transport = { path = "./packages/transport" }
+
+tokio = { version = "1.43.0", features = ["macros", "rt-multi-thread", "net", "io-util", "time", "fs"] }
+eyre = "0.6.12"
+tracing = "0.1.41"
+tracing-subscriber = { version = "0.3.19", features = ["env-filter"] }
+tracing-appender = "0.2.3"
+nusb = "0.1.12"
+delegate = "0.13.2"
+derive_more = { version = "2.0.1", features = ["from"] }
+parking_lot = "0.12.3"
+dashmap = "6.1.0"
+rsa = "0.9.7"
+dirs = "6.0.0"
+futures = "0.3.31"
+toml = "0.8.20"
+serde = { version = "1.0.217", features = ["derive"] }
+time = { version = "0.3.37", features = ["formatting", "macros"] }
+camino = { version = "1.1.9", features = ["serde1"] }

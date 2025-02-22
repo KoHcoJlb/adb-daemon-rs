@@ -1,0 +1,9 @@
+.idea/
+*.iml
+
+/target/
+
+adb_transport_log/
+adb-daemon.toml
+
+/local.just
