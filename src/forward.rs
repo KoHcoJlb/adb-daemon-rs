@@ -1,4 +1,4 @@
-use crate::connection::{Connection, PendingSocket};
+use crate::connection::{PendingSocket, WeakConnection};
 use crate::smart_socket::{BUF_SIZE, SmartSocket, Status};
 use derive_more::Display;
 use eyre::{OptionExt, Result, WrapErr, bail, ensure};
@@ -8,7 +8,7 @@ use std::collections::hash_map::Entry;
 use std::fmt::Write;
 use std::net::{IpAddr, SocketAddr};
 use std::str::FromStr;
-use std::sync::{Arc, Weak};
+use std::sync::Arc;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::spawn;
 use tokio::task::JoinHandle;
@@ -69,7 +69,7 @@ impl ForwardCommand {
 }
 
 struct Forward {
-    conn: Weak<Connection>,
+    conn: Arc<WeakConnection>,
     remote: Proto,
 }
 
@@ -108,14 +108,10 @@ async fn forward_task(listener: TcpListener, forward: Arc<RwLock<Forward>>) {
 
         let (conn, remote) = {
             let f = forward.read();
-            (f.conn.upgrade(), f.remote.clone())
+            (if let Ok(conn) = f.conn.upgrade() { conn } else { return }, f.remote.clone())
         };
 
-        let Some(conn) = conn else {
-            return;
-        };
-
-        let mut remote_socket = match conn.open_socket(&remote.to_string()).await {
+        let mut remote_socket = match conn.backend.open_socket(&remote.to_string()).await {
             Ok(s) => s,
             Err(err) => {
                 warn!(?err, "open remote failed");
@@ -144,7 +140,7 @@ impl ForwardingMgr {
         self.listeners
             .write()
             .await
-            .retain(|_, f| f.target.read().conn.strong_count() > 0 && !f.task.is_finished());
+            .retain(|_, f| !f.target.read().conn.is_closed() && !f.task.is_finished());
     }
 
     pub async fn handle_forward(&self, socket: &mut SmartSocket, service: &str) -> Result<bool> {
@@ -167,8 +163,7 @@ impl ForwardingMgr {
                         ensure!(!norebind, "already bound");
 
                         info!(%local, %remote, "changed forward");
-                        *entry.get().target.write() =
-                            Forward { conn: Arc::downgrade(&conn), remote }
+                        *entry.get().target.write() = Forward { conn, remote }
                     }
                     Entry::Vacant(entry) => {
                         let listener = TcpListener::bind(SocketAddr::new(
@@ -181,8 +176,7 @@ impl ForwardingMgr {
                         info!(%local, %remote, "added forward");
                         let span = info_span!(parent: None, "forward", %local, %remote, serial = conn.serial);
 
-                        let forward =
-                            Arc::new(RwLock::new(Forward { conn: Arc::downgrade(&conn), remote }));
+                        let forward = Arc::new(RwLock::new(Forward { conn, remote }));
                         entry.insert(ForwardTask {
                             task: spawn(forward_task(listener, forward.clone()).instrument(span)),
                             target: forward,
@@ -218,7 +212,7 @@ impl ForwardingMgr {
         Ok(true)
     }
 
-    pub fn handle_reverse(&self, conn: &Arc<Connection>, service: &str) -> Result<()> {
+    pub fn handle_reverse(&self, conn: &Arc<WeakConnection>, service: &str) -> Result<()> {
         let Some(service) = service.strip_prefix("reverse:") else {
             return Ok(());
         };
@@ -247,7 +241,7 @@ impl ForwardingMgr {
         Ok(())
     }
 
-    pub async fn handle_socket(&self, conn: &Arc<Connection>, socket: PendingSocket) {
+    pub async fn handle_socket(&self, conn: &Arc<WeakConnection>, socket: PendingSocket) {
         let service = socket.service().into_owned();
 
         let mut socket = Some(socket);

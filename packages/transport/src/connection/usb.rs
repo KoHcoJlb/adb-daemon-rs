@@ -155,6 +155,6 @@ impl ConnectionTrait for UsbConnection {
 
 impl Drop for UsbConnection {
     fn drop(&mut self) {
-        info!("usb connection dropped");
+        info!("dropped usb connection");
     }
 }

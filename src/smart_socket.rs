@@ -1,4 +1,4 @@
-use crate::connection::Connection;
+use crate::connection::WeakConnection;
 use crate::daemon::AdbDaemon;
 use crate::util::{read_protocol_string, write_protocol_string};
 use Status::*;
@@ -8,8 +8,8 @@ use eyre::{Result, WrapErr, bail};
 use std::fmt::Write;
 use std::io;
 use std::ops::Deref;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
-use std::sync::{Arc, Weak};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio::select;
@@ -64,7 +64,7 @@ impl SmartSocket {
 }
 
 enum DeviceSelector {
-    Connection(Weak<Connection>),
+    Connection(Arc<WeakConnection>),
     Serial(String),
     Any,
     None,
@@ -80,31 +80,30 @@ pub enum PickDeviceError {
     MoreThanOne,
     #[display("device '{_0}' not found")]
     NotFound(#[error(not(source))] String),
-    #[display("device disconnected")]
-    Disconnected,
 }
 
 impl SmartSocket {
-    pub fn pick_connection(&mut self) -> Result<Arc<Connection>, PickDeviceError> {
+    pub fn pick_connection(&mut self) -> Result<Arc<WeakConnection>, PickDeviceError> {
         use DeviceSelector::*;
 
         let connections = &self.daemon.connections;
         let conn = match &self.device {
-            Connection(conn) => return conn.upgrade().ok_or(PickDeviceError::Disconnected),
-            Serial(serial) => {
-                connections.get(serial).ok_or(PickDeviceError::NotFound(serial.clone()))?.clone()
-            }
+            Connection(conn) => return Ok(conn.clone()),
+            Serial(serial) => connections
+                .get(serial)
+                .ok_or(PickDeviceError::NotFound(serial.clone()))?
+                .downgrade(),
             Any => {
                 let mut iter = connections.iter();
                 let conn = iter.next().ok_or(PickDeviceError::NoDevices)?;
                 if iter.next().is_some() {
                     return Err(PickDeviceError::MoreThanOne);
                 }
-                conn.clone()
+                conn.downgrade()
             }
             None => Err(PickDeviceError::NotSelected)?,
         };
-        self.device = Connection(Arc::downgrade(&conn));
+        self.device = Connection(conn.clone());
         Span::current().record("serial", &conn.serial);
         Ok(conn)
     }
@@ -155,12 +154,11 @@ impl SmartSocket {
         let service = self.consume_device_selector(service).await?;
 
         let Some(service) = service.strip_prefix("host:") else {
-            // Do not hold connection hostage
-            let mut socket = {
-                let conn = self.pick_connection()?;
-                self.daemon.forwardings.handle_reverse(&conn, &service)?;
-                conn.open_socket(&service).await.context("open socket")?
-            };
+            let conn = self.pick_connection()?;
+            self.daemon.forwardings.handle_reverse(&conn, &service)?;
+
+            let mut socket =
+                conn.upgrade()?.backend.open_socket(&service).await.context("open socket")?;
             self.respond(Okay).await?;
 
             let _ = tokio::io::copy_bidirectional_with_sizes(
@@ -178,7 +176,7 @@ impl SmartSocket {
             "version" => self.respond_data(Okay, "0029").await?,
             "features" => {
                 let conn = self.pick_connection()?;
-                self.respond_data(Okay, conn.banner()?.features_str()).await?
+                self.respond_data(Okay, conn.upgrade()?.backend.banner()?.features_str()).await?
             }
             "devices" | "devices-l" => {
                 let long = service.ends_with('l');
@@ -186,7 +184,7 @@ impl SmartSocket {
                 let mut s = String::new();
                 for device in self.daemon.connections.iter() {
                     if long {
-                        let banner = device.banner()?;
+                        let banner = device.backend.banner()?;
 
                         write!(s, "{:22} device {}", device.serial, device.id)?;
 
@@ -216,9 +214,8 @@ impl SmartSocket {
             "wait-for-any-device" => {
                 self.respond(Okay).await?;
 
-                let connections = self.daemon.connections.clone();
+                let mut updates = self.daemon.connections.device_updates();
                 loop {
-                    let notify = connections.on_devices_changed();
                     match self.pick_connection() {
                         Ok(_) => break,
                         Err(PickDeviceError::NoDevices | PickDeviceError::NotFound(_)) => {}
@@ -227,7 +224,7 @@ impl SmartSocket {
 
                     let mut buf = [0];
                     select! {
-                        _ = notify => {},
+                        _ = updates.recv() => {},
                         res = self.conn.read(&mut buf) => {
                             if res? == 0 {
                                 trace!("closed");
@@ -242,7 +239,7 @@ impl SmartSocket {
                 self.respond(Okay).await?;
             }
             "reconnect" => {
-                self.pick_connection()?.backend.close();
+                self.pick_connection()?.upgrade()?.backend.close();
                 self.respond_data(Okay, "").await?
             }
             "reconnect-offline" => {

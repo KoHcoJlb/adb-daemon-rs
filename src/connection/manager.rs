@@ -1,5 +1,5 @@
 use crate::config::config;
-use crate::connection::{Connection, ConnectionBackend};
+use crate::connection::{Connection, ConnectionBackend, WeakConnection};
 use crate::forward::ForwardingMgr;
 use dashmap::DashMap;
 use dashmap::mapref::multiple::RefMulti;
@@ -8,30 +8,37 @@ use eyre::{Result, WrapErr};
 use futures::StreamExt;
 use rsa::RsaPrivateKey;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
-use tokio::sync::Notify;
-use tokio::sync::futures::Notified;
+use tokio::sync::broadcast;
 use tokio::time::sleep;
 use tokio::{select, spawn};
 use tracing::{error, info};
 
+#[derive(Debug, Clone)]
+#[allow(unused)]
+pub enum DeviceUpdate {
+    Added(Arc<WeakConnection>),
+    Removed(Arc<WeakConnection>),
+}
+
 pub struct ConnectionMgr {
-    pub(super) transport_id: AtomicU64,
     pub(super) by_serial: DashMap<String, Arc<Connection>>,
     pub(super) by_id: DashMap<u64, Arc<Connection>>,
-    pub(super) devices_changed: Notify,
+
+    device_updates: broadcast::Sender<DeviceUpdate>,
+
     pub(super) privkey: RsaPrivateKey,
     pub(super) forwardings: Arc<ForwardingMgr>,
 }
 
 impl ConnectionMgr {
     pub fn new(privkey: RsaPrivateKey, forwardings: Arc<ForwardingMgr>) -> Self {
+        let (tx, _) = broadcast::channel(128);
+
         Self {
-            transport_id: AtomicU64::new(1),
             by_serial: DashMap::new(),
             by_id: DashMap::new(),
-            devices_changed: Notify::new(),
+            device_updates: tx,
             privkey,
             forwardings,
         }
@@ -45,45 +52,40 @@ impl ConnectionMgr {
         self.by_serial.iter().filter(|c| !c.is_closed())
     }
 
-    pub fn on_devices_changed(&self) -> Notified {
-        self.devices_changed.notified()
+    pub fn device_updates(&self) -> broadcast::Receiver<DeviceUpdate> {
+        self.device_updates.subscribe()
     }
 
     pub(super) fn new_connection(
         &self, serial: String, backend: ConnectionBackend,
-    ) -> Arc<Connection> {
-        let connection = Arc::new(Connection {
-            id: self.transport_id.fetch_add(1, Ordering::SeqCst),
-            serial: serial.to_string(),
-            backend,
-            reverse_forwards: Default::default(),
-        });
+    ) -> Result<Arc<Connection>> {
+        let connection = Connection::new(serial, backend)?;
 
         info!(serial = connection.serial, id = connection.id, "created connection");
 
         self.by_serial.insert(connection.serial.clone(), connection.clone());
         self.by_id.insert(connection.id, connection.clone());
 
-        self.devices_changed.notify_waiters();
+        let _ = self.device_updates.send(DeviceUpdate::Added(connection.downgrade()));
 
-        connection
+        Ok(connection)
     }
 
     fn remove_closed_connections(&self) {
-        let mut changed = false;
-        self.by_serial.retain(|serial, conn| {
+        let mut removed = vec![];
+        self.by_serial.retain(|_, conn| {
             if conn.is_closed() {
-                info!(id = conn.id, serial, "connection is closed");
-                changed = true;
+                removed.push(conn.downgrade());
                 false
             } else {
                 true
             }
         });
-        self.by_id.retain(|_, conn| !conn.is_closed());
 
-        if changed {
-            self.devices_changed.notify_waiters();
+        for conn in removed {
+            info!(id = conn.id, serial = conn.serial, "connection is closed");
+            self.by_id.remove(&conn.id);
+            let _ = self.device_updates.send(DeviceUpdate::Removed(conn));
         }
     }
 

@@ -137,7 +137,7 @@ impl TransportBackend {
 
 impl Drop for TransportBackend {
     fn drop(&mut self) {
-        info!("transport backend dropped");
+        info!("dropped transport backend");
     }
 }
 
@@ -352,6 +352,6 @@ impl Transport {
 
 impl Drop for Transport {
     fn drop(&mut self) {
-        info!("transport is dropped")
+        info!("dropped transport")
     }
 }

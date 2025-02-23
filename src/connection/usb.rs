@@ -1,6 +1,6 @@
 use crate::config::config;
 use crate::connection::manager::ConnectionMgr;
-use crate::connection::{Connection, ConnectionBackend};
+use crate::connection::{ConnectionBackend, WeakConnection};
 use crate::forward::ForwardingMgr;
 use adb_transport::connection::usb::UsbConnection;
 use eyre::{Context, Result};
@@ -9,19 +9,24 @@ use std::sync::Arc;
 use tokio::spawn;
 use tracing::{error, instrument, warn};
 
-async fn accept_sockets_task(connection: Arc<Connection>, forwarding_mgr: Arc<ForwardingMgr>) {
-    let ConnectionBackend::AProto(transport) = &connection.backend;
-
+async fn accept_sockets_task(connection: Arc<WeakConnection>, forwarding_mgr: Arc<ForwardingMgr>) {
     loop {
-        let s = match transport.accept_socket().await {
-            Ok(s) => s,
-            Err(err) => {
-                warn!(?err, "accept socket");
+        let sock = {
+            let Ok(conn) = connection.upgrade() else {
                 return;
+            };
+            let ConnectionBackend::AProto(transport) = &conn.backend;
+
+            match transport.accept_socket().await {
+                Ok(s) => s,
+                Err(err) => {
+                    warn!(?err, "accept socket");
+                    return;
+                }
             }
         };
 
-        forwarding_mgr.handle_socket(&connection, s.into()).await;
+        forwarding_mgr.handle_socket(&connection, sock.into()).await;
     }
 }
 
@@ -74,8 +79,8 @@ impl ConnectionMgr {
                 Err(err) => Err(err).context("auth error")?,
             }
 
-            let conn = self.new_connection(serial, ConnectionBackend::AProto(transport));
-            spawn(accept_sockets_task(conn, self.forwardings.clone()));
+            let conn = self.new_connection(serial, ConnectionBackend::AProto(transport))?;
+            spawn(accept_sockets_task(conn.downgrade(), self.forwardings.clone()));
 
             <Result<_>>::Ok(())
         }
