@@ -3,7 +3,7 @@ use crate::message::{AdbCommand, AdbMessage};
 use crate::transport::{TransportBackend, MAX_PAYLOAD};
 use crate::util::MaybeDone;
 use crate::{Error, Result};
-use diatomic_waker::DiatomicWaker;
+use diatomic_waker::{WakeSink, WakeSource};
 use parking_lot::Mutex;
 use std::collections::VecDeque;
 use std::future::Future;
@@ -18,6 +18,10 @@ use tokio::spawn;
 use tokio::time::{interval, Interval};
 use tracing::span::EnteredSpan;
 use tracing::{debug, info, info_span, warn, Instrument, Span};
+
+fn io_error(cause: impl Into<Error>) -> io::Error {
+    io::Error::new(io::ErrorKind::BrokenPipe, cause.into())
+}
 
 pub(crate) struct State {
     pub remote_id: u32,
@@ -37,8 +41,8 @@ pub(crate) struct SocketBackend {
     local_id: u32,
     span: Span,
 
-    pub read_waker: DiatomicWaker,
-    pub write_waker: DiatomicWaker,
+    pub read_waker: WakeSource,
+    pub write_waker: WakeSource,
 
     pub state: Mutex<State>,
 }
@@ -46,7 +50,7 @@ pub(crate) struct SocketBackend {
 impl SocketBackend {
     fn check_transport_error(&self) -> io::Result<()> {
         if let Some(err) = self.transport.error.get() {
-            Err(io::Error::new(io::ErrorKind::BrokenPipe, err.clone()))
+            Err(io_error(ErrorKind::TransportError(err.clone())))
         } else {
             Ok(())
         }
@@ -54,21 +58,6 @@ impl SocketBackend {
 
     fn enter_span(&self) -> EnteredSpan {
         self.span.clone().entered()
-    }
-
-    fn poll_flush(&self, cx: &mut Context) -> Poll<io::Result<()>> {
-        unsafe { self.write_waker.register(cx.waker()) };
-
-        self.check_transport_error()?;
-
-        let mut state = self.state.lock();
-        ready!(state.write_fut.poll(cx))?;
-
-        if state.acknowledged == state.initial_acknowledgment {
-            Poll::Ready(Ok(()))
-        } else {
-            Poll::Pending
-        }
     }
 
     fn shutdown(&self) -> Option<impl Future<Output = ()>> {
@@ -148,12 +137,17 @@ impl Drop for SocketBackend {
 
 pub struct Socket {
     pub(crate) inner: Arc<SocketBackend>,
+    pub(crate) read_waker: WakeSink,
+    pub(crate) write_waker: WakeSink,
 }
 
 impl Socket {
     pub(crate) fn new(
         transport: Arc<TransportBackend>, local_id: u32, remote_id: u32, acknowledged: usize,
     ) -> Self {
+        let read_waker = WakeSink::new();
+        let write_waker = WakeSink::new();
+
         Self {
             inner: SocketBackend {
                 transport,
@@ -165,8 +159,8 @@ impl Socket {
                     remote_id = if remote_id != 0 { Some(remote_id) } else { None }
                 ),
 
-                read_waker: DiatomicWaker::new(),
-                write_waker: DiatomicWaker::new(),
+                read_waker: read_waker.source(),
+                write_waker: write_waker.source(),
 
                 state: State {
                     remote_id,
@@ -183,6 +177,9 @@ impl Socket {
                 .into(),
             }
             .into(),
+
+            read_waker,
+            write_waker,
         }
     }
 }
@@ -196,9 +193,9 @@ impl Drop for Socket {
 
 impl AsyncRead for Socket {
     fn poll_read(
-        self: Pin<&mut Self>, cx: &mut Context<'_>, buf: &mut ReadBuf<'_>,
+        mut self: Pin<&mut Self>, cx: &mut Context<'_>, buf: &mut ReadBuf<'_>,
     ) -> Poll<io::Result<()>> {
-        unsafe { self.inner.read_waker.register(cx.waker()) }
+        self.read_waker.register(cx.waker());
 
         let _span = self.inner.enter_span();
         self.inner.check_transport_error()?;
@@ -245,7 +242,7 @@ impl AsyncRead for Socket {
                 transport
                     .write_message(msg)
                     .await
-                    .map_err(|e| io::Error::other(Error::from((ErrorKind::msg("OKAY"), e))))
+                    .map_err(|e| io_error((ErrorKind::msg("OKAY"), e)))
             })
             .poll(cx)?;
 
@@ -255,9 +252,9 @@ impl AsyncRead for Socket {
 
 impl AsyncWrite for Socket {
     fn poll_write(
-        self: Pin<&mut Self>, cx: &mut Context<'_>, buf: &[u8],
+        mut self: Pin<&mut Self>, cx: &mut Context<'_>, buf: &[u8],
     ) -> Poll<io::Result<usize>> {
-        unsafe { self.inner.write_waker.register(cx.waker()) }
+        self.write_waker.register(cx.waker());
 
         let _span = self.inner.enter_span();
         self.inner.check_transport_error()?;
@@ -265,7 +262,7 @@ impl AsyncWrite for Socket {
         let mut state = self.inner.state.lock();
 
         if state.closed {
-            Err(io::Error::new(io::ErrorKind::BrokenPipe, Error::from(ErrorKind::Closed)))?;
+            Err(io_error(ErrorKind::Closed))?;
         }
 
         ready!(state.write_fut.poll(cx))?;
@@ -300,23 +297,38 @@ impl AsyncWrite for Socket {
                 transport
                     .write_message(msg)
                     .await
-                    .map_err(|e| io::Error::other(Error::from((ErrorKind::msg("WRTE"), e))))
+                    .map_err(|e| io_error((ErrorKind::msg("WRTE"), e)))
             })
             .poll(cx)?;
 
         Poll::Ready(Ok(len))
     }
 
-    fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         let _span = self.inner.enter_span();
-        self.inner.poll_flush(cx)
+        self.write_waker.register(cx.waker());
+
+        self.inner.check_transport_error()?;
+
+        let mut state = self.inner.state.lock();
+        ready!(state.write_fut.poll(cx))?;
+
+        if state.acknowledged == state.initial_acknowledgment {
+            Poll::Ready(Ok(()))
+        } else {
+            if state.closed {
+                Err(io_error((ErrorKind::msg("flush"), Error::from(ErrorKind::Closed))))?;
+            }
+
+            Poll::Pending
+        }
     }
 
-    fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+    fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         let _span = self.inner.enter_span();
         info!("shutdown");
 
-        ready!(self.inner.poll_flush(cx))?;
+        ready!(self.as_mut().poll_flush(cx))?;
 
         if let Some(fut) = self.inner.shutdown() {
             self.inner

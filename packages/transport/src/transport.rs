@@ -303,7 +303,7 @@ impl Transport {
         let local_id = self.inner.last_id.fetch_add(1, Ordering::SeqCst);
         info!(local_id, service, "open socket");
 
-        let socket = Socket::new(self.inner.clone(), local_id, 0, 0);
+        let mut socket = Socket::new(self.inner.clone(), local_id, 0, 0);
         self.inner.sockets.insert(local_id, socket.inner.clone());
 
         let mut payload = service.as_bytes().to_vec();
@@ -316,7 +316,7 @@ impl Transport {
         let remote_id = poll_fn::<Result<_>, _>(|cx| {
             self.check_error()?;
 
-            unsafe { socket.inner.write_waker.register(cx.waker()) };
+            socket.write_waker.register(cx.waker());
 
             let state = socket.inner.state.lock();
             if state.closed {
