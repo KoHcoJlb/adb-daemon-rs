@@ -319,11 +319,11 @@ impl Transport {
             socket.write_waker.register(cx.waker());
 
             let state = socket.inner.state.lock();
-            if state.closed {
-                Err(ErrorKind::Closed)?;
-            }
             if state.remote_id != 0 {
                 return Poll::Ready(Ok(state.remote_id));
+            }
+            if state.closed {
+                Err(ErrorKind::Closed)?;
             }
             Poll::Pending
         })
