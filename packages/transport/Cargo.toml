@@ -7,7 +7,7 @@ edition = "2021"
 tokio = { version = "1.43.0", features = ["macros", "rt-multi-thread", "sync", "time"] }
 tracing = "0.1.41"
 nusb = "0.1.12"
-derive_more = { version = "2.0.1", features = ["error", "display", "try_from", "from", "debug"] }
+derive_more = { version = "2.0.1", features = ["error", "debug", "display", "try_from"] }
 bytes = "1.10.0"
 enum_dispatch = "0.3.13"
 bstr = "1.11.3"

@@ -7,7 +7,7 @@ mod socket;
 mod transport;
 mod util;
 
-pub use banner::Banner;
+pub use banner::{Banner, DeviceType};
 pub use error::{Error, ErrorKind, Result};
 pub use socket::Socket;
 pub use transport::{AuthMode, PendingSocket, Transport};

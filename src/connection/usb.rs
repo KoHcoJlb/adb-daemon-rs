@@ -2,6 +2,7 @@ use crate::config::config;
 use crate::connection::manager::ConnectionMgr;
 use crate::connection::{ConnectionBackend, WeakConnection};
 use crate::forward::ForwardingMgr;
+use adb_transport::DeviceType;
 use adb_transport::connection::usb::UsbConnection;
 use eyre::{Context, Result};
 use nusb::DeviceInfo;
@@ -79,8 +80,13 @@ impl ConnectionMgr {
                 Err(err) => Err(err).context("auth error")?,
             }
 
-            let conn = self.new_connection(serial, ConnectionBackend::AProto(transport))?;
-            spawn(accept_sockets_task(conn.downgrade(), self.forwardings.clone()));
+            if transport.banner()?.device_type == DeviceType::Device {
+                let conn = self.new_connection(serial, ConnectionBackend::AProto(transport))?;
+                spawn(accept_sockets_task(conn.downgrade(), self.forwardings.clone()));
+            } else {
+                warn!("not a device");
+                transport.close();
+            }
 
             <Result<_>>::Ok(())
         }
