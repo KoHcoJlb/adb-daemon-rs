@@ -1,4 +1,4 @@
-use crate::connection::{PendingSocket, WeakConnection};
+use crate::connection::types::{PendingSocket, WeakConnection};
 use crate::smart_socket::{BUF_SIZE, SmartSocket, Status};
 use derive_more::Display;
 use eyre::{OptionExt, Result, WrapErr, bail, ensure};
@@ -274,12 +274,12 @@ impl ForwardingMgr {
         }
         .await
         {
-            warn!(serial = conn.serial, %service, ?err, "accept reverse socket");
+            warn!(%service, ?err, "accept reverse socket");
             if let Some(socket) = socket {
                 let _ = socket.close().await;
             }
         } else {
-            debug!(serial = conn.serial, %service, "accept reverse socket");
+            debug!(%service, "accept reverse socket");
         }
     }
 }

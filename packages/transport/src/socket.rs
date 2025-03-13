@@ -195,9 +195,9 @@ impl AsyncRead for Socket {
     fn poll_read(
         mut self: Pin<&mut Self>, cx: &mut Context<'_>, buf: &mut ReadBuf<'_>,
     ) -> Poll<io::Result<()>> {
+        let _span = self.inner.enter_span();
         self.read_waker.register(cx.waker());
 
-        let _span = self.inner.enter_span();
         self.inner.check_transport_error()?;
 
         let mut state = self.inner.state.lock();
@@ -254,9 +254,9 @@ impl AsyncWrite for Socket {
     fn poll_write(
         mut self: Pin<&mut Self>, cx: &mut Context<'_>, buf: &[u8],
     ) -> Poll<io::Result<usize>> {
+        let _span = self.inner.enter_span();
         self.write_waker.register(cx.waker());
 
-        let _span = self.inner.enter_span();
         self.inner.check_transport_error()?;
 
         let mut state = self.inner.state.lock();

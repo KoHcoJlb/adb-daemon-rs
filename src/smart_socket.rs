@@ -1,4 +1,4 @@
-use crate::connection::WeakConnection;
+use crate::connection::types::WeakConnection;
 use crate::daemon::AdbDaemon;
 use crate::util::{read_protocol_string, write_protocol_string};
 use Status::*;

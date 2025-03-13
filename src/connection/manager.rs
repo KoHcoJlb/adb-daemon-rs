@@ -1,6 +1,7 @@
 use crate::config::config;
-use crate::connection::{Connection, ConnectionBackend, WeakConnection};
+use crate::connection::types::{Connection, ConnectionBackend, MaybeConnection, WeakConnection};
 use crate::forward::ForwardingMgr;
+use adb_transport::DeviceType;
 use dashmap::DashMap;
 use dashmap::mapref::multiple::RefMulti;
 use dashmap::mapref::one::Ref;
@@ -31,6 +32,10 @@ pub struct ConnectionMgr {
     pub(super) forwardings: Arc<ForwardingMgr>,
 }
 
+fn connection_filter(c: &Connection) -> bool {
+    !c.is_closed() && c.banner.device_type == DeviceType::Device
+}
+
 impl ConnectionMgr {
     pub fn new(privkey: RsaPrivateKey, forwardings: Arc<ForwardingMgr>) -> Self {
         let (tx, _) = broadcast::channel(128);
@@ -45,11 +50,11 @@ impl ConnectionMgr {
     }
 
     pub fn get(&self, serial: &str) -> Option<Ref<String, Arc<Connection>>> {
-        self.by_serial.get(serial).filter(|c| !c.is_closed())
+        self.by_serial.get(serial).filter(|c| connection_filter(c))
     }
 
     pub fn iter(&self) -> impl Iterator<Item = RefMulti<String, Arc<Connection>>> {
-        self.by_serial.iter().filter(|c| !c.is_closed())
+        self.by_serial.iter().filter(|c| connection_filter(c))
     }
 
     pub fn device_updates(&self) -> broadcast::Receiver<DeviceUpdate> {
@@ -57,11 +62,11 @@ impl ConnectionMgr {
     }
 
     pub(super) fn new_connection(
-        &self, serial: String, backend: ConnectionBackend,
+        &self, conn: MaybeConnection, backend: ConnectionBackend,
     ) -> Result<Arc<Connection>> {
-        let connection = Connection::new(serial, backend)?;
+        let connection = conn.create(backend)?;
 
-        info!(serial = connection.serial, id = connection.id, "created connection");
+        info!(parent: &connection.span, "created connection");
 
         self.by_serial.insert(connection.serial.clone(), connection.clone());
         self.by_id.insert(connection.id, connection.clone());
@@ -83,7 +88,8 @@ impl ConnectionMgr {
         });
 
         for conn in removed {
-            info!(id = conn.id, serial = conn.serial, "connection is closed");
+            let _span = conn.span.clone().entered();
+            info!("connection is closed");
             self.by_id.remove(&conn.id);
             let _ = self.device_updates.send(DeviceUpdate::Removed(conn));
         }

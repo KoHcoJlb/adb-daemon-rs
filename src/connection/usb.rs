@@ -1,14 +1,13 @@
 use crate::config::config;
 use crate::connection::manager::ConnectionMgr;
-use crate::connection::{ConnectionBackend, WeakConnection};
+use crate::connection::types::{ConnectionBackend, MaybeConnection, WeakConnection};
 use crate::forward::ForwardingMgr;
-use adb_transport::DeviceType;
 use adb_transport::connection::usb::UsbConnection;
 use eyre::{Context, Result};
 use nusb::DeviceInfo;
 use std::sync::Arc;
 use tokio::spawn;
-use tracing::{error, instrument, warn};
+use tracing::{Instrument, error, warn};
 
 async fn accept_sockets_task(connection: Arc<WeakConnection>, forwarding_mgr: Arc<ForwardingMgr>) {
     loop {
@@ -32,8 +31,7 @@ async fn accept_sockets_task(connection: Arc<WeakConnection>, forwarding_mgr: Ar
 }
 
 impl ConnectionMgr {
-    #[instrument(skip(self, device))]
-    async fn create_usb_connection(self: Arc<Self>, serial: String, device: DeviceInfo) {
+    async fn create_usb_connection(self: Arc<Self>, conn: MaybeConnection, device: DeviceInfo) {
         use adb_transport::connection::usb::UsbError;
         use adb_transport::{AuthMode, Error, ErrorKind};
         use nusb::transfer::TransferError;
@@ -80,13 +78,11 @@ impl ConnectionMgr {
                 Err(err) => Err(err).context("auth error")?,
             }
 
-            if transport.banner()?.device_type == DeviceType::Device {
-                let conn = self.new_connection(serial, ConnectionBackend::AProto(transport))?;
-                spawn(accept_sockets_task(conn.downgrade(), self.forwardings.clone()));
-            } else {
-                warn!("not a device");
-                transport.close();
-            }
+            let conn = self.new_connection(conn, ConnectionBackend::AProto(transport))?;
+            spawn(
+                accept_sockets_task(conn.downgrade(), self.forwardings.clone())
+                    .instrument(conn.span.clone()),
+            );
 
             <Result<_>>::Ok(())
         }
@@ -114,8 +110,9 @@ impl ConnectionMgr {
                 continue;
             }
 
-            let serial = serial.to_string();
-            spawn(self.clone().create_usb_connection(serial, device));
+            let conn = MaybeConnection::alloc(serial);
+            let span = conn.span.clone();
+            spawn(self.clone().create_usb_connection(conn, device).instrument(span));
         }
         Ok(())
     }
