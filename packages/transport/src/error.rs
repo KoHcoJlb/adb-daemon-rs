@@ -1,6 +1,5 @@
 use crate::connection::usb::UsbError;
-use derive_more::with_trait::From;
-use derive_more::Display;
+use derive_more::{Display, From};
 use std::sync::Arc;
 
 #[derive(Debug, Display, From)]

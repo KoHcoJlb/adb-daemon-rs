@@ -18,7 +18,7 @@ use std::time::Duration;
 use tokio::select;
 use tokio::sync::Notify;
 use tokio::time::timeout;
-use tracing::{debug, error, info, trace, Instrument, Span};
+use tracing::{debug, error, info, trace, warn, Instrument, Span};
 
 pub(crate) const DELAYED_ACK_BYTES: u32 = 32 * 1024 * 1024;
 pub(crate) const MAX_PAYLOAD: u32 = 1024 * 1024;
@@ -103,6 +103,7 @@ impl TransportBackend {
         let err = Arc::new(err);
 
         if self.error.set(err.clone()).is_ok() {
+            warn!(?err, "set transport error");
             self.close_notify.notify_waiters();
             self.sockets.retain(|_, sock| {
                 sock.read_waker.notify();

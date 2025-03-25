@@ -50,6 +50,7 @@ pub(crate) struct SocketBackend {
 impl SocketBackend {
     fn check_transport_error(&self) -> io::Result<()> {
         if let Some(err) = self.transport.error.get() {
+            debug!(?err, "transport error");
             Err(io_error(ErrorKind::TransportError(err.clone())))
         } else {
             Ok(())
