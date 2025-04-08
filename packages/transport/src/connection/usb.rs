@@ -4,7 +4,7 @@ use crate::message::{AdbMessage, AdbMessageHeader};
 use crate::{Error, Result};
 use derive_more::Display;
 use nusb::transfer::{Direction, EndpointType, Queue, RequestBuffer, TransferError};
-use nusb::{DeviceInfo, InterfaceInfo};
+use nusb::{Device, DeviceInfo};
 use std::future::poll_fn;
 use std::mem;
 use std::task::{ready, Poll};
@@ -41,24 +41,45 @@ pub struct UsbConnection {
     packet_size: usize,
 }
 
-fn find_interface(device: &DeviceInfo) -> Option<&InterfaceInfo> {
-    device.interfaces().find(|i| {
-        i.class() == ADB_CLASS && i.subclass() == ADB_SUBCLASS && i.protocol() == ADB_PROTOCOL
-    })
-}
-
 impl UsbConnection {
-    pub fn is_supported(device: &DeviceInfo) -> bool {
-        find_interface(device).is_some()
+    #[cfg(not(windows))]
+    fn open_device(device: &DeviceInfo) -> Result<(Device, u8)> {
+        let iface = device
+            .interfaces()
+            .find(|i| {
+                i.class() == ADB_CLASS
+                    && i.subclass() == ADB_SUBCLASS
+                    && i.protocol() == ADB_PROTOCOL
+            })
+            .ok_or(UsbError::Unsupported)?;
+        Ok((device.open()?, iface.interface_number()))
+    }
+
+    #[cfg(windows)]
+    fn open_device(device: &DeviceInfo) -> Result<(Device, u8)> {
+        if device.vendor_id() != 0x18D1 || device.product_id() != 0x4EE7 {
+            Err(UsbError::Unsupported)?
+        }
+
+        let device = device.open()?;
+        let iface = device
+            .active_configuration()
+            .map_err(|_| Error::from((UsbError::Other, Error::msg("active configuration error"))))?
+            .interface_alt_settings()
+            .find(|i| {
+                i.class() == ADB_CLASS
+                    && i.subclass() == ADB_SUBCLASS
+                    && i.protocol() == ADB_PROTOCOL
+            })
+            .map(|i| i.interface_number())
+            .ok_or(UsbError::Unsupported)?;
+        Ok((device, iface))
     }
 
     pub fn new(device: &DeviceInfo) -> Result<UsbConnection> {
-        let Some(iface) = find_interface(device) else { Err(UsbError::Unsupported)? };
+        let (device, iface) = Self::open_device(device)?;
 
-        let device = device.open()?;
-
-        let iface =
-            device.claim_interface(iface.interface_number()).map_err(|e| (UsbError::Claim, e))?;
+        let iface = device.claim_interface(iface).map_err(|e| (UsbError::Claim, e))?;
 
         let iface_desc = iface.descriptors().next().ok_or((UsbError::Other, "no interface"))?;
 

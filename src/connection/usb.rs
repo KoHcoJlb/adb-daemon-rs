@@ -2,7 +2,8 @@ use crate::config::config;
 use crate::connection::manager::ConnectionMgr;
 use crate::connection::types::{ConnectionBackend, MaybeConnection, WeakConnection};
 use crate::forward::ForwardingMgr;
-use adb_transport::connection::usb::UsbConnection;
+use adb_transport::ErrorKind;
+use adb_transport::connection::usb::{UsbConnection, UsbError};
 use eyre::{Context, Result};
 use nusb::DeviceInfo;
 use std::sync::Arc;
@@ -31,22 +32,15 @@ async fn accept_sockets_task(connection: Arc<WeakConnection>, forwarding_mgr: Ar
 }
 
 impl ConnectionMgr {
-    async fn create_usb_connection(self: Arc<Self>, conn: MaybeConnection, device: DeviceInfo) {
+    async fn create_usb_connection(
+        self: Arc<Self>, daemon_conn: MaybeConnection, transport_conn: UsbConnection,
+        device: DeviceInfo,
+    ) {
         use adb_transport::connection::usb::UsbError;
         use adb_transport::{AuthMode, Error, ErrorKind};
         use nusb::transfer::TransferError;
 
         if let Err(err) = async {
-            let transport_conn = match UsbConnection::new(&device) {
-                Ok(conn) => conn,
-                Err(err) => {
-                    warn!(?err, "create usb connection");
-                    return Ok(());
-                }
-            };
-
-            // create usb transport err=Error { msg: "create transport", source: Error { kind: TransportError, source: Some(Error { kind: Usb(Transfer(Fault)), source: None }) } }
-
             let mut transport = match adb_transport::Transport::new(transport_conn.into())
                 .await
                 .context("create transport")
@@ -78,7 +72,7 @@ impl ConnectionMgr {
                 Err(err) => Err(err).context("auth error")?,
             }
 
-            let conn = self.new_connection(conn, ConnectionBackend::AProto(transport))?;
+            let conn = self.new_connection(daemon_conn, ConnectionBackend::AProto(transport))?;
             spawn(
                 accept_sockets_task(conn.downgrade(), self.forwardings.clone())
                     .instrument(conn.span.clone()),
@@ -94,10 +88,6 @@ impl ConnectionMgr {
 
     pub(super) async fn refresh_usb(self: &Arc<Self>) -> Result<()> {
         for device in nusb::list_devices().context("list devices")? {
-            if !UsbConnection::is_supported(&device) {
-                continue;
-            }
-
             let Some(serial) = device.serial_number() else {
                 continue;
             };
@@ -110,9 +100,24 @@ impl ConnectionMgr {
                 continue;
             }
 
-            let conn = MaybeConnection::alloc(serial);
-            let span = conn.span.clone();
-            spawn(self.clone().create_usb_connection(conn, device).instrument(span));
+            let transport_conn = match UsbConnection::new(&device) {
+                Ok(conn) => conn,
+                Err(adb_transport::Error {
+                    kind: ErrorKind::Usb(UsbError::Unsupported), ..
+                }) => continue,
+                Err(err) => {
+                    warn!(serial, ?err, "create usb connection");
+                    continue;
+                }
+            };
+
+            let daemon_conn = MaybeConnection::alloc(serial);
+            let span = daemon_conn.span.clone();
+            spawn(
+                self.clone()
+                    .create_usb_connection(daemon_conn, transport_conn, device)
+                    .instrument(span),
+            );
         }
         Ok(())
     }

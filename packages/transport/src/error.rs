@@ -40,6 +40,11 @@ impl Error {
     ) -> Self {
         Self { kind: kind.into(), source: Some(source.into()) }
     }
+
+    #[allow(dead_code)]
+    pub(crate) fn msg(msg: impl AsRef<str>) -> Self {
+        ErrorKind::Msg(msg.as_ref().into()).into()
+    }
 }
 
 impl std::error::Error for Error {
