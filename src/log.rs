@@ -2,7 +2,7 @@ use crate::config::config;
 use camino::Utf8PathBuf;
 use eyre::{Result, WrapErr};
 use std::fs::File;
-use std::io::{BufWriter, Seek, Write};
+use std::io::{BufWriter, Seek, Write, stderr};
 use std::time::Instant;
 use std::{fs, io};
 use time::macros::format_description;
@@ -111,14 +111,14 @@ impl Write for RollingWriter {
     }
 }
 
-pub fn init() -> Option<WorkerGuard> {
-    let (transport_log, guard) = if let Some(path) = &config().transport_log {
-        let (writer, guard) = NonBlockingBuilder::default()
-            .lossy(false)
-            .finish(BufWriter::new(RollingWriter::new(path.clone(), 100 * 1024 * 1024, 20)));
+pub fn init(transport_log: bool) -> Option<WorkerGuard> {
+    let (transport_log, guard) = config().transport_log.as_ref().filter(|_| transport_log)
+        .map(|path| {
+            let (writer, guard) = NonBlockingBuilder::default()
+                .lossy(false)
+                .finish(BufWriter::new(RollingWriter::new(path.clone(), 100 * 1024 * 1024, 20)));
 
-        (
-            Some(
+            (
                 fmt::layer()
                     .with_writer(writer)
                     .with_ansi(false)
@@ -126,16 +126,17 @@ pub fn init() -> Option<WorkerGuard> {
                     .with_filter(EnvFilter::new(
                         "adb_daemon_rs=trace,adb_daemon_rs::log=off,adb_transport=trace,adb_transport::connection=info",
                     )),
-            ),
-            Some(guard),
-        )
-    } else {
-        (None, None)
-    };
+                guard,
+            )
+        }).unzip();
 
     registry()
         .with(transport_log)
-        .with(fmt::layer().with_filter(EnvFilter::new("adb_daemon_rs=trace,adb_transport=info")))
+        .with(
+            fmt::layer()
+                .with_writer(stderr)
+                .with_filter(EnvFilter::new("adb_daemon_rs=trace,adb_transport=info")),
+        )
         .init();
 
     guard

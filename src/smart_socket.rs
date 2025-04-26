@@ -6,10 +6,10 @@ use adb_transport::Banner;
 use derive_more::{Display, Error};
 use eyre::{Result, WrapErr, bail};
 use std::fmt::Write;
-use std::io;
 use std::ops::Deref;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
+use std::{io, process};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio::select;
@@ -174,6 +174,11 @@ impl SmartSocket {
 
         match service {
             "version" => self.respond_data(Okay, "0029").await?,
+            "is-adb-daemon-rs" => self.respond(Okay).await?,
+            "kill" => {
+                self.respond(Okay).await?;
+                process::exit(0);
+            }
             "features" => {
                 let conn = self.pick_connection()?;
                 self.respond_data(Okay, conn.upgrade()?.backend.banner()?.features_str()).await?
@@ -186,7 +191,7 @@ impl SmartSocket {
                     if long {
                         let banner = device.backend.banner()?;
 
-                        write!(s, "{:22} device {}", device.serial, device.id)?;
+                        write!(s, "{:22}	device {}", device.serial, device.id)?;
 
                         for (name, key) in [
                             ("product", Banner::PRODUCT_NAME),
@@ -202,7 +207,7 @@ impl SmartSocket {
 
                         writeln!(s, " transport_id:{}", device.id)?;
                     } else {
-                        writeln!(s, "{} device", device.key())?;
+                        writeln!(s, "{}	device", device.key())?;
                     }
                 }
                 self.respond_data(Okay, s).await?
