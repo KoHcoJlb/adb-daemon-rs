@@ -2,6 +2,8 @@
 name = "adb-transport"
 version = "0.1.0"
 edition = "2021"
+license = "GPL-3.0-or-later"
+description = "Implementation of ADB transport (USB) protocol"
 
 [dependencies]
 tokio = { version = "1.43.0", features = ["macros", "rt-multi-thread", "sync", "time"] }
