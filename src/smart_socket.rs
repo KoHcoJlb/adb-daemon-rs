@@ -2,7 +2,7 @@ use crate::connection::types::WeakConnection;
 use crate::daemon::AdbDaemon;
 use crate::util::{read_protocol_string, write_protocol_string};
 use Status::*;
-use adb_transport::Banner;
+use adb_transport::{Banner, DeviceType};
 use derive_more::{Display, Error};
 use eyre::{Result, WrapErr, bail};
 use std::fmt::Write;
@@ -109,11 +109,11 @@ impl SmartSocket {
     }
 
     async fn consume_device_selector(&mut self, mut service: String) -> Result<String> {
-        let mut legacy = true;
-        if let Some(serial) = service.strip_prefix("host:transport:") {
-            service = format!("host:tport:serial:{serial}")
+        let legacy = if let Some(serial) = service.strip_prefix("host:transport:") {
+            service = format!("host:tport:serial:{serial}");
+            true
         } else {
-            legacy = false;
+            false
         };
 
         Ok(if let Some(s) = service.strip_prefix("host:tport:") {
@@ -191,7 +191,11 @@ impl SmartSocket {
                     if long {
                         let banner = device.backend.banner()?;
 
-                        write!(s, "{:22}	device {}", device.serial, device.id)?;
+                        write!(
+                            s,
+                            "{:22}	{} {}",
+                            device.serial, device.banner.device_type, device.id
+                        )?;
 
                         for (name, key) in [
                             ("product", Banner::PRODUCT_NAME),
@@ -207,7 +211,7 @@ impl SmartSocket {
 
                         writeln!(s, " transport_id:{}", device.id)?;
                     } else {
-                        writeln!(s, "{}	device", device.key())?;
+                        writeln!(s, "{}	{}", device.key(), device.banner.device_type)?;
                     }
                 }
                 self.respond_data(Okay, s).await?
@@ -222,8 +226,8 @@ impl SmartSocket {
                 let mut updates = self.daemon.connections.device_updates();
                 loop {
                     match self.pick_connection() {
-                        Ok(_) => break,
-                        Err(PickDeviceError::NoDevices | PickDeviceError::NotFound(_)) => {}
+                        Ok(conn) if conn.banner.device_type == DeviceType::Device => break,
+                        Ok(_) | Err(PickDeviceError::NoDevices | PickDeviceError::NotFound(_)) => {}
                         Err(err) => Err(err)?,
                     }
 

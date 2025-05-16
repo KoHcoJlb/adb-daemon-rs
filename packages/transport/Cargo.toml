@@ -22,3 +22,4 @@ sha1 = { version = "0.10.6", features = ["oid"] }
 flume = "0.11.1"
 dashmap = "6.1.0"
 diatomic-waker = "0.2.3"
+strum = { version = "0.27.1", features = ["derive"] }

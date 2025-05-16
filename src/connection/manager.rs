@@ -1,7 +1,6 @@
 use crate::config::config;
 use crate::connection::types::{Connection, ConnectionBackend, MaybeConnection, WeakConnection};
 use crate::forward::ForwardingMgr;
-use adb_transport::DeviceType;
 use dashmap::DashMap;
 use dashmap::mapref::multiple::RefMulti;
 use dashmap::mapref::one::Ref;
@@ -33,7 +32,7 @@ pub struct ConnectionMgr {
 }
 
 fn connection_filter(c: &Connection) -> bool {
-    !c.is_closed() && c.banner.device_type == DeviceType::Device
+    !c.is_closed()
 }
 
 impl ConnectionMgr {
