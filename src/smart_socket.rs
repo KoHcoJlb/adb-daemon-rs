@@ -63,6 +63,7 @@ impl SmartSocket {
     }
 }
 
+#[derive(Debug, Clone)]
 enum DeviceSelector {
     Connection(Arc<WeakConnection>),
     Serial(String),
@@ -224,7 +225,9 @@ impl SmartSocket {
                 self.respond(Okay).await?;
 
                 let mut updates = self.daemon.connections.device_updates();
+                let selector = self.device.clone();
                 loop {
+                    self.device = selector.clone();
                     match self.pick_connection() {
                         Ok(conn) if conn.banner.device_type == DeviceType::Device => break,
                         Ok(_) | Err(PickDeviceError::NoDevices | PickDeviceError::NotFound(_)) => {}
