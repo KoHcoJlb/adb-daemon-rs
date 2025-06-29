@@ -94,7 +94,7 @@ impl ConnectionBackend {
 
     pub fn banner(&self) -> Result<&Banner> {
         match self {
-            ConnectionBackend::AProto(t) => t.banner().map_err(Into::into),
+            ConnectionBackend::AProto(t) => Ok(t.banner()),
         }
     }
 

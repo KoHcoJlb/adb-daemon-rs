@@ -1,12 +1,12 @@
+use crate::connection::ConnectionTrait;
 use crate::error::ErrorKind;
 use crate::message::{AdbCommand, AdbMessage};
-use crate::transport::{TransportBackend, MAX_PAYLOAD};
-use crate::util::MaybeDone;
+use crate::transport::{ConnectionExt, TransportBackend, MAX_PAYLOAD};
 use crate::{Error, Result};
+use bytes::{Buf, BufMut};
 use diatomic_waker::{WakeSink, WakeSource};
 use parking_lot::Mutex;
 use std::collections::VecDeque;
-use std::future::Future;
 use std::io;
 use std::io::Cursor;
 use std::pin::Pin;
@@ -17,7 +17,7 @@ use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::spawn;
 use tokio::time::{interval, Interval};
 use tracing::span::EnteredSpan;
-use tracing::{debug, info, info_span, warn, Instrument, Span};
+use tracing::{debug, info, info_span, warn, Span};
 
 fn io_error(cause: impl Into<Error>) -> io::Error {
     io::Error::new(io::ErrorKind::BrokenPipe, cause.into())
@@ -28,11 +28,9 @@ pub(crate) struct State {
     pub closed: bool,
 
     read_buffer: VecDeque<Cursor<Vec<u8>>>,
-    read_fut: MaybeDone<io::Result<()>>,
 
     initial_acknowledgment: isize,
     acknowledged: isize,
-    write_fut: MaybeDone<io::Result<()>>,
     write_throttle: Interval,
 }
 
@@ -48,6 +46,7 @@ pub(crate) struct SocketBackend {
 }
 
 impl SocketBackend {
+    #[inline]
     fn check_transport_error(&self) -> io::Result<()> {
         if let Some(err) = self.transport.error.get() {
             debug!(?err, "transport error");
@@ -57,27 +56,22 @@ impl SocketBackend {
         }
     }
 
+    #[inline]
     fn enter_span(&self) -> EnteredSpan {
         self.span.clone().entered()
     }
 
-    fn shutdown(&self) -> Option<impl Future<Output = ()>> {
+    fn shutdown(&self) -> Option<AdbMessage> {
         if self.check_transport_error().is_ok() {
             let mut state = self.state.lock();
             if !state.closed {
                 state.closed = true;
-
-                let transport = self.transport.clone();
-                let msg =
-                    AdbMessage::new(AdbCommand::CLSE, self.local_id, state.remote_id, Vec::new());
-                return Some(
-                    async move {
-                        if let Err(err) = transport.write_message(msg).await {
-                            warn!(?err, "failed to close socket");
-                        }
-                    }
-                    .instrument(self.span.clone()),
-                );
+                return Some(AdbMessage::new(
+                    AdbCommand::CLSE,
+                    self.local_id,
+                    state.remote_id,
+                    Vec::new(),
+                ));
             }
         }
 
@@ -127,9 +121,12 @@ impl Drop for SocketBackend {
     fn drop(&mut self) {
         let _span = self.enter_span();
 
-        if let Some(fut) = self.shutdown() {
+        if let Some(msg) = self.shutdown() {
             warn!("dropping non closed socket");
-            spawn(fut);
+            let transport = self.transport.clone();
+            spawn(async move {
+                let _ = transport.write_message_async(msg).await;
+            });
         } else {
             debug!("dropping socket backend");
         }
@@ -167,12 +164,10 @@ impl Socket {
                     remote_id,
                     closed: false,
 
-                    read_fut: MaybeDone::empty(),
                     read_buffer: VecDeque::new(),
 
                     initial_acknowledgment: acknowledged as isize,
                     acknowledged: acknowledged as isize,
-                    write_fut: MaybeDone::empty(),
                     write_throttle: interval(Duration::from_millis(10)),
                 }
                 .into(),
@@ -202,8 +197,9 @@ impl AsyncRead for Socket {
         self.inner.check_transport_error()?;
 
         let mut state = self.inner.state.lock();
+        let mut conn = self.inner.transport.get_connection();
 
-        ready!(state.read_fut.poll(cx))?;
+        ready!(conn.poll_flush(cx)).map_err(io_error)?;
 
         let filled = buf.filled().len();
         while buf.remaining() > 0 {
@@ -211,9 +207,9 @@ impl AsyncRead for Socket {
                 break;
             };
 
-            let _ = Pin::new(&mut *front).poll_read(cx, buf);
+            buf.put(front.take(buf.remaining()));
 
-            if front.position() == front.get_ref().len() as u64 {
+            if !front.has_remaining() {
                 state.read_buffer.pop_front();
             }
         }
@@ -229,23 +225,13 @@ impl AsyncRead for Socket {
 
         debug!(acknowledge = filled);
 
-        let msg = AdbMessage::new(
+        conn.write_message(AdbMessage::new(
             AdbCommand::OKAY,
             self.inner.local_id,
             state.remote_id,
             (filled as u32).to_le_bytes().into(),
-        );
-
-        let transport = self.inner.transport.clone();
-        let _ = state
-            .read_fut
-            .set(async move {
-                transport
-                    .write_message(msg)
-                    .await
-                    .map_err(|e| io_error((ErrorKind::msg("OKAY"), e)))
-            })
-            .poll(cx)?;
+        ))
+        .map_err(io_error)?;
 
         Poll::Ready(Ok(()))
     }
@@ -266,7 +252,8 @@ impl AsyncWrite for Socket {
             Err(io_error(ErrorKind::Closed))?;
         }
 
-        ready!(state.write_fut.poll(cx))?;
+        let mut conn = self.inner.transport.get_connection();
+        ready!(conn.poll_flush(cx)).map_err(io_error)?;
 
         if state.acknowledged <= -state.initial_acknowledgment {
             return Poll::Pending;
@@ -284,23 +271,13 @@ impl AsyncWrite for Socket {
         state.acknowledged -= len as isize;
         debug!(write = len, acknowledged = state.acknowledged);
 
-        let msg = AdbMessage::new(
+        conn.write_message(AdbMessage::new(
             AdbCommand::WRTE,
             self.inner.local_id,
             state.remote_id,
             buf[..len].to_vec(),
-        );
-
-        let transport = self.inner.transport.clone();
-        let _ = state
-            .write_fut
-            .set(async move {
-                transport
-                    .write_message(msg)
-                    .await
-                    .map_err(|e| io_error((ErrorKind::msg("WRTE"), e)))
-            })
-            .poll(cx)?;
+        ))
+        .map_err(io_error)?;
 
         Poll::Ready(Ok(len))
     }
@@ -311,8 +288,8 @@ impl AsyncWrite for Socket {
 
         self.inner.check_transport_error()?;
 
-        let mut state = self.inner.state.lock();
-        ready!(state.write_fut.poll(cx))?;
+        let state = self.inner.state.lock();
+        ready!(self.inner.transport.get_connection().poll_flush(cx)).map_err(io_error)?;
 
         if state.acknowledged == state.initial_acknowledgment {
             Poll::Ready(Ok(()))
@@ -331,16 +308,10 @@ impl AsyncWrite for Socket {
 
         ready!(self.as_mut().poll_flush(cx))?;
 
-        if let Some(fut) = self.inner.shutdown() {
-            self.inner
-                .state
-                .lock()
-                .write_fut
-                .set(async move {
-                    fut.await;
-                    Ok(())
-                })
-                .poll(cx)
+        if let Some(msg) = self.inner.shutdown() {
+            let mut conn = self.inner.transport.get_connection();
+            conn.write_message(msg).map_err(io_error)?; // relies on self.poll_flush flushing connection
+            conn.poll_flush(cx).map_err(io_error)
         } else {
             debug!("shutdown completed");
             Poll::Ready(Ok(()))

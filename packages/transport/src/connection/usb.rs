@@ -5,11 +5,9 @@ use crate::{Error, Result};
 use derive_more::Display;
 use nusb::transfer::{Direction, EndpointType, Queue, RequestBuffer, TransferError};
 use nusb::{Device, DeviceInfo};
-use std::future::poll_fn;
 use std::mem;
-use std::task::{ready, Poll};
-use tokio::sync::Mutex;
-use tracing::{debug, info, trace};
+use std::task::{ready, Context, Poll};
+use tracing::{debug, info, instrument, trace, Level};
 
 const ADB_CLASS: u8 = 0xff;
 const ADB_SUBCLASS: u8 = 0x42;
@@ -36,9 +34,11 @@ impl From<nusb::Error> for Error {
 }
 
 pub struct UsbConnection {
-    in_queue: Mutex<Queue<RequestBuffer>>,
-    out_queue: Mutex<Queue<Vec<u8>>>,
+    in_queue: Queue<RequestBuffer>,
+    out_queue: Queue<Vec<u8>>,
     packet_size: usize,
+
+    in_header: Option<AdbMessageHeader>,
 }
 
 impl UsbConnection {
@@ -103,74 +103,65 @@ impl UsbConnection {
             in_queue: iface.bulk_in_queue(in_ep.address()).into(),
             out_queue: iface.bulk_out_queue(out_ep.address()).into(),
             packet_size,
+
+            in_header: None,
         })
     }
 }
 
 impl ConnectionTrait for UsbConnection {
-    async fn read_message(&self) -> Result<AdbMessage> {
-        trace!("read message");
-
-        let mut queue = self.in_queue.lock().await;
-
-        // trace!("locked queue");
-
-        if queue.pending() == 0 {
-            queue.submit(RequestBuffer::new(AdbMessageHeader::LENGTH));
+    fn poll_read_message(&mut self, cx: &mut Context) -> Poll<Result<AdbMessage>> {
+        if self.in_queue.pending() == 0 {
+            self.in_queue.submit(RequestBuffer::new(AdbMessageHeader::LENGTH));
         }
 
-        let buf = queue
-            .next_complete()
-            .await
-            .into_result()
-            .map_err(|e| (UsbError::Transfer(e), "read header"))?;
-        let header = AdbMessageHeader::read(&buf[..])?;
-
-        trace!(?header, "read header");
-
-        let payload = if header.data_length > 0 {
-            queue.submit(RequestBuffer::new(header.data_length as usize));
-
-            queue
-                .next_complete()
-                .await
+        loop {
+            let buf = ready!(self.in_queue.poll_next(cx))
                 .into_result()
-                .map_err(|e| (UsbError::Transfer(e), "read payload"))?
-        } else {
-            Vec::new()
-        };
+                .map_err(|e| UsbError::Transfer(e))?;
+            trace!(buf = buf.len(), header = self.in_header.is_some());
 
-        queue.submit(RequestBuffer::reuse(buf, AdbMessageHeader::LENGTH));
+            if let Some(header) = self.in_header.take() {
+                return Poll::Ready(Ok(AdbMessage { header, payload: buf }));
+            } else {
+                let header = AdbMessageHeader::read(&buf[..])?;
+                trace!(?header, "received header");
 
-        Ok(AdbMessage { header, payload })
+                if header.data_length > 0 {
+                    self.in_queue.submit(RequestBuffer::new(header.data_length as usize));
+                }
+                self.in_queue.submit(RequestBuffer::reuse(buf, AdbMessageHeader::LENGTH));
+
+                if header.data_length == 0 {
+                    return Poll::Ready(Ok(AdbMessage { header, payload: vec![] }));
+                }
+                self.in_header = Some(header);
+            }
+        }
     }
 
-    async fn write_message(&self, mut msg: AdbMessage) -> Result<()> {
+    fn write_message(&mut self, mut msg: AdbMessage) -> Result<()> {
+        assert_eq!(self.out_queue.pending(), 0, "must flush before write_message");
         trace!(?msg, "write message");
 
-        let mut queue = self.out_queue.lock().await;
-
-        queue.submit(msg.header.to_vec());
+        self.out_queue.submit(msg.header.to_vec());
         if !msg.payload.is_empty() {
-            queue.submit(mem::take(&mut msg.payload));
+            self.out_queue.submit(mem::take(&mut msg.payload));
 
             if msg.header.data_length % self.packet_size as u32 == 0 {
-                queue.submit(Vec::new());
+                self.out_queue.submit(Vec::new());
             }
         }
 
-        poll_fn(|cx| {
-            while queue.pending() > 0 {
-                ready!(queue.poll_next(cx)).into_result().map_err(UsbError::Transfer)?;
-            }
-
-            Poll::Ready(<Result<_>>::Ok(()))
-        })
-        .await?;
-
-        trace!(?msg, "written");
-
         Ok(())
+    }
+
+    #[instrument(skip_all, fields(len = self.out_queue.pending()), ret(level = Level::TRACE))]
+    fn poll_flush(&mut self, cx: &mut Context) -> Poll<Result<()>> {
+        while self.out_queue.pending() > 0 {
+            ready!(self.out_queue.poll_next(cx)).into_result().map_err(UsbError::Transfer)?;
+        }
+        Poll::Ready(Ok(()))
     }
 }
 

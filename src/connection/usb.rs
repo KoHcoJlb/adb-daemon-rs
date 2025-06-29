@@ -4,7 +4,7 @@ use crate::connection::types::{ConnectionBackend, MaybeConnection, WeakConnectio
 use crate::forward::ForwardingMgr;
 use adb_transport::ErrorKind;
 use adb_transport::connection::usb::{UsbConnection, UsbError};
-use eyre::{Context, Result};
+use eyre::{Context, Result, eyre};
 use nusb::DeviceInfo;
 use std::sync::Arc;
 use tokio::spawn;
@@ -41,36 +41,21 @@ impl ConnectionMgr {
         use nusb::transfer::TransferError;
 
         if let Err(err) = async {
-            let mut transport = match adb_transport::Transport::new(transport_conn.into())
-                .await
-                .context("create transport")
-            {
-                Ok(t) => t,
-                Err(err) => {
-                    if let Some(Error {
-                        kind: ErrorKind::Usb(UsbError::Transfer(TransferError::Fault)),
-                        ..
-                    }) = err.root_cause().downcast_ref::<Error>()
-                    {
-                        warn!("transfer fault, reset device");
-                        if let Err(err) = device.open().and_then(|d| d.reset()) {
-                            warn!(?err, "reset failed");
-                        }
-                        return Ok(());
+            let transport = adb_transport::AuthTransport::new(transport_conn.into()).await?;
+
+            let transport =
+                match transport.auth(AuthMode::Existing(&self.privkey)).await.context("auth")? {
+                    Ok(transport) => transport,
+                    Err(transport) => {
+                        warn!("auth rejected, offering key");
+
+                        transport
+                            .auth(AuthMode::New(&self.privkey))
+                            .await
+                            .context("offer key")?
+                            .map_err(|_| eyre!("key rejected"))?
                     }
-                    return Err(err);
-                }
-            };
-
-            match transport.auth(AuthMode::Existing(&self.privkey)).await {
-                Ok(_) => {}
-                Err(Error { kind: ErrorKind::AuthRejected, .. }) => {
-                    warn!("auth rejected, offering key");
-
-                    transport.auth(AuthMode::New(&self.privkey)).await.context("offer key")?;
-                }
-                Err(err) => Err(err).context("auth error")?,
-            }
+                };
 
             let conn = self.new_connection(daemon_conn, ConnectionBackend::AProto(transport))?;
             spawn(
@@ -83,6 +68,17 @@ impl ConnectionMgr {
         .await
         {
             error!(?err, "create usb transport");
+
+            if let Some(Error {
+                kind: ErrorKind::Usb(UsbError::Transfer(TransferError::Fault)),
+                ..
+            }) = err.root_cause().downcast_ref::<Error>()
+            {
+                warn!("transfer fault, reset device");
+                if let Err(err) = device.open().and_then(|d| d.reset()) {
+                    warn!(?err, "reset failed");
+                }
+            }
         }
     }
 

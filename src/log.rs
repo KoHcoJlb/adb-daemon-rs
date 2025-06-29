@@ -123,9 +123,9 @@ pub fn init(transport_log: bool) -> Option<WorkerGuard> {
                     .with_writer(writer)
                     .with_ansi(false)
                     .fmt_fields(FormatFieldsWrapper::<1>::default())
-                    .with_filter(EnvFilter::new(
-                        "adb_daemon_rs=trace,adb_daemon_rs::log=off,adb_transport=trace,adb_transport::connection=info",
-                    )),
+                    .with_filter(EnvFilter::try_from_default_env().unwrap_or(EnvFilter::new(
+                        "adb_daemon_rs=trace,adb_daemon_rs::log=off,adb_transport=trace,adb_transport::connection=trace"
+                    ))),
                 guard,
             )
         }).unzip();

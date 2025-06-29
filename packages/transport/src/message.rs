@@ -21,7 +21,7 @@ pub enum AdbCommand {
     STLS = 0x534C5453,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct AdbMessageHeader {
     pub command: AdbCommand,
     pub arg0: u32,
@@ -80,7 +80,7 @@ impl fmt::Debug for PayloadFmt<'_> {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct AdbMessage {
     pub header: AdbMessageHeader,
     #[debug("{:?}", PayloadFmt(&self.payload))]

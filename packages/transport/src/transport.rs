@@ -7,17 +7,17 @@ use crate::socket::{Socket, SocketBackend};
 use crate::{Error, Result};
 use dashmap::DashMap;
 use flume::{bounded, Receiver, Sender};
+use parking_lot::{Mutex, MutexGuard};
 use rsa::{Pkcs1v15Sign, RsaPrivateKey};
 use sha1::Sha1;
-use std::future::poll_fn;
+use std::future::{poll_fn, Future};
+use std::mem::take;
 use std::str::FromStr;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, OnceLock};
-use std::task::Poll;
-use std::time::Duration;
+use std::task::{ready, Context, Poll, Wake, Waker};
 use tokio::select;
 use tokio::sync::Notify;
-use tokio::time::timeout;
 use tracing::{debug, error, info, trace, warn, Instrument, Span};
 
 pub(crate) const DELAYED_ACK_BYTES: u32 = 32 * 1024 * 1024;
@@ -29,18 +29,102 @@ const AUTH_TYPE_PUBLICKEY: u32 = 3;
 
 const CONN_STR: &str = "host::features=shell_v2,cmd,stat_v2,ls_v2,fixed_push_mkdir,apex,abb,fixed_push_symlink_timestamp,abb_exec,remount_shell,track_app,sendrecv_v2,sendrecv_v2_brotli,sendrecv_v2_lz4,sendrecv_v2_zstd,sendrecv_v2_dry_run_send,openscreen_mdns,devicetracker_proto_format,delayed_ack";
 
-pub enum AuthMode<'a> {
-    New(&'a RsaPrivateKey),
-    Existing(&'a RsaPrivateKey),
+#[derive(Default)]
+struct WakerCollection(Mutex<Vec<Waker>>);
+
+impl Wake for WakerCollection {
+    fn wake(self: Arc<Self>) {
+        for waker in take(&mut *self.0.lock()) {
+            waker.wake();
+        }
+    }
+}
+
+struct ConnectionWrapper {
+    inner: Connection,
+    write_wakers: Arc<WakerCollection>,
+}
+
+pub struct ConnectionWrapperGuard<'a> {
+    inner: MutexGuard<'a, Option<ConnectionWrapper>>,
+    transport: &'a TransportBackend,
+}
+
+impl ConnectionWrapperGuard<'_> {
+    fn get(&mut self) -> Result<&mut ConnectionWrapper> {
+        self.inner.as_mut().ok_or(ErrorKind::Closed.into())
+    }
+
+    fn on_error(&mut self, err: Error) -> Error {
+        MutexGuard::unlocked(&mut self.inner, || self.transport.on_error(err))
+    }
+}
+
+impl ConnectionTrait for ConnectionWrapperGuard<'_> {
+    fn poll_read_message(&mut self, cx: &mut Context) -> Poll<Result<AdbMessage>> {
+        self.get()?.inner.poll_read_message(cx)
+    }
+
+    fn write_message(&mut self, msg: AdbMessage) -> Result<()> {
+        trace!(?msg, "write message");
+        self.get()?
+            .inner
+            .write_message(msg)
+            .map_err(|err| self.on_error((ErrorKind::msg("write"), err).into()))
+    }
+
+    fn poll_flush(&mut self, cx: &mut Context) -> Poll<Result<()>> {
+        let inner = self.get()?;
+        inner.write_wakers.0.lock().push(cx.waker().clone());
+        inner
+            .inner
+            .poll_flush(&mut Context::from_waker(&inner.write_wakers.clone().into()))
+            .map_err(|err| self.on_error((ErrorKind::msg("write (flush)"), err).into()))
+    }
+}
+
+pub trait ConnectionExt: Sized {
+    fn get_connection(&mut self) -> impl ConnectionTrait;
+
+    fn read_message_async(mut self) -> impl Future<Output = Result<AdbMessage>> {
+        poll_fn(move |cx| self.get_connection().poll_read_message(cx))
+    }
+
+    fn write_message_async(mut self, msg: AdbMessage) -> impl Future<Output = Result<()>> {
+        let mut msg = Some(msg);
+        poll_fn(move |cx| {
+            let mut conn = self.get_connection();
+            loop {
+                ready!(conn.poll_flush(cx))?;
+                if let Some(msg) = msg.take() {
+                    conn.write_message(msg)?;
+                } else {
+                    return Poll::Ready(Ok(()));
+                }
+            }
+        })
+    }
+}
+
+impl ConnectionExt for &mut Connection {
+    fn get_connection(&mut self) -> impl ConnectionTrait {
+        self
+    }
 }
 
 pub(crate) struct TransportBackend {
-    connection: Connection,
+    connection: Mutex<Option<ConnectionWrapper>>,
     last_id: AtomicU32,
     pub error: OnceLock<Arc<Error>>,
     close_notify: Notify,
     pub sockets: DashMap<u32, Arc<SocketBackend>>,
-    banner: OnceLock<Banner>,
+    banner: Banner,
+}
+
+impl ConnectionExt for &TransportBackend {
+    fn get_connection(&mut self) -> impl ConnectionTrait {
+        (&*self).get_connection()
+    }
 }
 
 impl TransportBackend {
@@ -48,7 +132,7 @@ impl TransportBackend {
         self.check_error()?;
 
         let mut msg = select! {
-            msg = self.connection.read_message() => msg?,
+            msg = self.read_message_async() => msg?,
             _ = self.close_notify.notified() => return Ok(()),
         };
         trace!(?msg, "received message");
@@ -104,6 +188,7 @@ impl TransportBackend {
 
         if self.error.set(err.clone()).is_ok() {
             warn!(?err, "set transport error");
+            self.connection.lock().take();
             self.close_notify.notify_waiters();
             self.sockets.retain(|_, sock| {
                 sock.read_waker.notify();
@@ -123,16 +208,8 @@ impl TransportBackend {
         }
     }
 
-    pub async fn write_message(&self, msg: AdbMessage) -> Result<()> {
-        trace!(?msg, "write message");
-        if let Err(err) = timeout(Duration::from_secs(15), self.connection.write_message(msg))
-            .await
-            .unwrap_or(Err(ErrorKind::WriteTimeout.into()))
-        {
-            Err(self.on_error(err))
-        } else {
-            Ok(())
-        }
+    pub fn get_connection(&self) -> ConnectionWrapperGuard {
+        ConnectionWrapperGuard { inner: self.connection.lock(), transport: self }
     }
 }
 
@@ -166,26 +243,37 @@ impl PendingSocket {
             self.remote_id,
             DELAYED_ACK_BYTES.to_le_bytes().into(),
         );
-        self.backend.write_message(msg).await?;
+        self.backend.write_message_async(msg).await?;
 
         Ok(socket)
     }
 
     pub async fn close(self) -> Result<()> {
         self.backend
-            .write_message(AdbMessage::new(AdbCommand::CLSE, 0, self.remote_id, Vec::new()))
+            .write_message_async(AdbMessage::new(AdbCommand::CLSE, 0, self.remote_id, Vec::new()))
             .await
     }
 }
 
-pub struct Transport {
-    inner: Arc<TransportBackend>,
-    pending_rx: Option<Receiver<PendingSocket>>,
+pub enum AuthMode<'a> {
+    New(&'a RsaPrivateKey),
+    Existing(&'a RsaPrivateKey),
+}
+
+pub struct AuthTransport {
+    conn: Connection,
     last_auth: Option<AdbMessage>,
 }
 
-impl Transport {
-    fn handle_cnxn(&mut self, msg: AdbMessage) -> Result<()> {
+impl AuthTransport {
+    pub async fn new(mut conn: Connection) -> Result<Self> {
+        let cnxn =
+            AdbMessage::new(AdbCommand::CNXN, VERSION, MAX_PAYLOAD, CONN_STR.as_bytes().into());
+        conn.write_message_async(cnxn).await?;
+        Ok(Self { conn, last_auth: None })
+    }
+
+    fn handle_cnxn(self, msg: AdbMessage) -> Result<Transport> {
         let conn_str = String::from_utf8(msg.payload)
             .map_err(|_| (ErrorKind::InvalidData, "malformed conn str"))?;
 
@@ -196,71 +284,33 @@ impl Transport {
         if !banner.features.contains("delayed_ack") {
             Err(ErrorKind::DelayedAckNotAvailable)?
         }
-        // banner.features.remove("shell_v2");
 
-        self.inner.banner.set(banner).unwrap();
+        let inner = Arc::new(TransportBackend {
+            connection: Some(ConnectionWrapper {
+                inner: self.conn,
+                write_wakers: Default::default(),
+            })
+            .into(),
+            last_id: AtomicU32::new(1),
+            error: OnceLock::new(),
+            close_notify: Notify::new(),
+            sockets: DashMap::new(),
+            banner,
+        });
 
-        let (tx, rx) = bounded(10);
-        tokio::spawn(self.inner.clone().reader_task(tx).instrument(Span::current()));
-        self.pending_rx = Some(rx);
+        let (pending_tx, pending_rx) = bounded(3);
+        tokio::spawn(inner.clone().reader_task(pending_tx).instrument(Span::current()));
 
-        Ok(())
+        Ok(Transport { inner, pending_rx: Some(pending_rx) })
     }
 
-    fn check_error(&self) -> Result<()> {
-        self.inner.check_error()
-    }
-}
-
-impl Transport {
-    pub async fn new(conn: Connection) -> Result<Self> {
-        let transport = Self {
-            inner: Arc::new(TransportBackend {
-                connection: conn,
-                last_id: AtomicU32::new(1),
-                error: OnceLock::new(),
-                close_notify: Notify::new(),
-                sockets: DashMap::new(),
-                banner: OnceLock::new(),
-            }),
-            pending_rx: None,
-            last_auth: None,
-        };
-
-        let cnxn =
-            AdbMessage::new(AdbCommand::CNXN, VERSION, MAX_PAYLOAD, CONN_STR.as_bytes().into());
-        transport.inner.write_message(cnxn).await?;
-
-        Ok(transport)
-    }
-
-    pub fn close(&self) {
-        self.inner.on_error(ErrorKind::Closed.into());
-    }
-
-    pub fn is_closed(&self) -> bool {
-        self.inner.error.get().is_some()
-    }
-
-    pub fn banner(&self) -> Result<&Banner> {
-        if let Some(features) = self.inner.banner.get() {
-            Ok(features)
-        } else {
-            Err(ErrorKind::NotAuthenticated.into())
-        }
-    }
-
-    pub async fn auth(&mut self, key: AuthMode<'_>) -> Result<()> {
-        if self.inner.banner.get().is_some() {
-            Err(ErrorKind::AlreadyAuthenticated)?;
-        }
-
+    pub async fn auth(mut self, key: AuthMode<'_>) -> Result<Result<Transport, Self>> {
         let mut key = Some(key);
         loop {
             let msg = if let Some(msg) = self.last_auth.take() {
                 msg
             } else {
-                self.inner.connection.read_message().await?
+                self.conn.read_message_async().await?
             };
             trace!(?msg);
 
@@ -269,7 +319,7 @@ impl Transport {
                     let msg = match key.take() {
                         None => {
                             self.last_auth = Some(msg);
-                            Err(ErrorKind::AuthRejected)?
+                            return Ok(Err(self));
                         }
                         Some(AuthMode::Existing(key)) => {
                             let signature = key
@@ -285,19 +335,43 @@ impl Transport {
                         ),
                     };
 
-                    self.inner.write_message(msg).await?;
+                    self.conn.write_message_async(msg).await?;
                 }
                 AdbCommand::CNXN => {
-                    return self.handle_cnxn(msg);
+                    return self.handle_cnxn(msg).map(Ok);
                 }
                 _ => {}
             }
         }
     }
+}
+
+pub struct Transport {
+    inner: Arc<TransportBackend>,
+    pending_rx: Option<Receiver<PendingSocket>>,
+}
+
+impl Transport {
+    fn check_error(&self) -> Result<()> {
+        self.inner.check_error()
+    }
+}
+
+impl Transport {
+    pub fn close(&self) {
+        self.inner.on_error(ErrorKind::Closed.into());
+    }
+
+    pub fn is_closed(&self) -> bool {
+        self.inner.error.get().is_some()
+    }
+
+    pub fn banner(&self) -> &Banner {
+        &self.inner.banner
+    }
 
     pub async fn open_socket(&self, service: &str) -> Result<Socket> {
         self.check_error()?;
-        self.banner()?;
 
         info!(socket_count = self.inner.sockets.len());
 
@@ -311,7 +385,12 @@ impl Transport {
         payload.push(0);
 
         self.inner
-            .write_message(AdbMessage::new(AdbCommand::OPEN, local_id, DELAYED_ACK_BYTES, payload))
+            .write_message_async(AdbMessage::new(
+                AdbCommand::OPEN,
+                local_id,
+                DELAYED_ACK_BYTES,
+                payload,
+            ))
             .await?;
 
         let remote_id = poll_fn::<Result<_>, _>(|cx| {
@@ -340,8 +419,6 @@ impl Transport {
     }
 
     pub async fn accept_socket(&self) -> Result<PendingSocket> {
-        self.banner()?;
-
         self.pending_rx
             .as_ref()
             .ok_or((ErrorKind::Closed, "no receiver"))?
