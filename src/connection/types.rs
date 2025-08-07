@@ -55,7 +55,7 @@ pub enum PendingSocket {
 }
 
 impl PendingSocket {
-    pub fn service(&self) -> Cow<str> {
+    pub fn service(&self) -> Cow<'_, str> {
         match self {
             PendingSocket::AProto(s) => Cow::Borrowed(s.service()),
         }

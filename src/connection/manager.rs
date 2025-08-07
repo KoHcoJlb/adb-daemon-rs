@@ -48,11 +48,11 @@ impl ConnectionMgr {
         }
     }
 
-    pub fn get(&self, serial: &str) -> Option<Ref<String, Arc<Connection>>> {
+    pub fn get(&self, serial: &str) -> Option<Ref<'_, String, Arc<Connection>>> {
         self.by_serial.get(serial).filter(|c| connection_filter(c))
     }
 
-    pub fn iter(&self) -> impl Iterator<Item = RefMulti<String, Arc<Connection>>> {
+    pub fn iter(&self) -> impl Iterator<Item = RefMulti<'_, String, Arc<Connection>>> {
         self.by_serial.iter().filter(|c| connection_filter(c))
     }
 

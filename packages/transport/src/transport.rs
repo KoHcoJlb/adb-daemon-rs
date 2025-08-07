@@ -208,7 +208,7 @@ impl TransportBackend {
         }
     }
 
-    pub fn get_connection(&self) -> ConnectionWrapperGuard {
+    pub fn get_connection(&self) -> ConnectionWrapperGuard<'_> {
         ConnectionWrapperGuard { inner: self.connection.lock(), transport: self }
     }
 }
