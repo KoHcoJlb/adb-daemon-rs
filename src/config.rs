@@ -14,7 +14,10 @@ pub fn config_dir() -> Result<PathBuf> {
 #[derive(Debug, Default, Deserialize)]
 pub struct UsbConfig {
     enabled: Option<bool>,
-    whitelist: Option<HashSet<String>>,
+    #[serde(default)]
+    include: HashSet<String>,
+    #[serde(default)]
+    exclude: HashSet<String>,
 }
 
 impl UsbConfig {
@@ -23,7 +26,7 @@ impl UsbConfig {
     }
 
     pub fn is_whitelisted(&self, serial: &str) -> bool {
-        self.whitelist.as_ref().is_none_or(|l| l.contains(serial))
+        (self.include.is_empty() || self.include.contains(serial)) && !self.exclude.contains(serial)
     }
 }
 
