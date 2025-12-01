@@ -1,3 +1,4 @@
+use crate::config::config;
 use crate::connection::types::{PendingSocket, WeakConnection};
 use crate::smart_socket::{BUF_SIZE, SmartSocket, Status};
 use derive_more::Display;
@@ -167,7 +168,7 @@ impl ForwardingMgr {
                     }
                     Entry::Vacant(entry) => {
                         let listener = TcpListener::bind(SocketAddr::new(
-                            IpAddr::from_str("0.0.0.0").unwrap(),
+                            config().listen_address().ip(),
                             port,
                         ))
                         .await

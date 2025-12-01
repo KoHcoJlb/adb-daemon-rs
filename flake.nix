@@ -1,11 +1,10 @@
 {
   inputs = {
     crane.url = "github:ipetkov/crane";
-    flake-utils.url = "github:numtide/flake-utils";
   };
 
   outputs =
-    { crane, flake-utils, ... }:
+    { crane, ... }:
 
     let
       mkPackages =

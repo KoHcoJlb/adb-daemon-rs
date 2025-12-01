@@ -1,4 +1,4 @@
-use crate::config::{config, config_dir};
+use crate::config::config;
 use crate::connection::manager::ConnectionMgr;
 use crate::forward::ForwardingMgr;
 use crate::smart_socket::SmartSocket;
@@ -17,7 +17,7 @@ fn check_adb_server() -> Result<bool> {
     trace!("check adb server");
 
     fn run_service(svc: &str) -> io::Result<bool> {
-        let mut s = TcpStream::connect(("127.0.0.1", config().smart_socket_port()))?;
+        let mut s = TcpStream::connect(("127.0.0.1", config().listen_address().port()))?;
 
         s.write_all(format!("{:04x}{svc}", svc.len()).as_bytes())?;
 
@@ -47,7 +47,7 @@ pub fn bind_smartsocket() -> Result<Option<net::TcpListener>> {
         if check_adb_server()? {
             return Ok(None);
         } else {
-            match net::TcpListener::bind(("0.0.0.0", config().smart_socket_port())) {
+            match net::TcpListener::bind(config().listen_address()) {
                 Ok(s) => return Ok(Some(s)),
                 Err(e) if e.kind() == io::ErrorKind::AddrInUse => {}
                 Err(e) => Err(e).context("bind smartsocket")?,
@@ -75,7 +75,7 @@ pub struct AdbDaemon {
 impl AdbDaemon {
     pub async fn new() -> Result<Arc<Self>> {
         let privkey =
-            fs::read_to_string(config_dir()?.join("adbkey")).await.context("read private key")?;
+            fs::read_to_string(config().private_key()?).await.context("read private key")?;
         let privkey = RsaPrivateKey::from_pkcs8_pem(&privkey).context("decode private key")?;
 
         let forwardings = Arc::new(ForwardingMgr::new());
