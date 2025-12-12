@@ -3,7 +3,11 @@ use crate::smart_socket::devices::PickDeviceError;
 use crate::smart_socket::{BUF_SIZE, SmartSocket};
 use adb_transport::DeviceType;
 use eyre::{Context, bail};
+use futures::FutureExt;
+use std::pin::pin;
 use std::process;
+use tokio::io::{AsyncWriteExt, BufReader, split};
+use tokio::select;
 use tracing::trace;
 
 impl SmartSocket {
@@ -21,13 +25,35 @@ impl SmartSocket {
                 conn.upgrade()?.backend.open_socket(&service).await.context("open socket")?;
             self.respond(Okay).await?;
 
-            let _ = tokio::io::copy_bidirectional_with_sizes(
-                &mut socket,
-                &mut self.conn,
-                BUF_SIZE,
-                BUF_SIZE,
-            )
-            .await;
+            // Emulate half-close on tcp side, so client can read buffered data after the socket is closed
+            // Otherwise with copy_bidirectional_with_sizes, if client was actively writing, it will receive
+            // write error and exit
+            let (socket_r, mut socket_w) = split(&mut socket);
+            let (conn_r, mut conn_w) = split(&mut self.conn);
+
+            let mut socket_to_conn = pin!(
+                async {
+                    let mut r = BufReader::with_capacity(BUF_SIZE, socket_r);
+                    tokio::io::copy_buf(&mut r, &mut conn_w).await?;
+                    conn_w.shutdown().await
+                }
+                .fuse()
+            );
+            let mut conn_to_socket = pin!(
+                async {
+                    let mut r = BufReader::with_capacity(BUF_SIZE, conn_r);
+                    tokio::io::copy_buf(&mut r, &mut socket_w).await?;
+                    socket_w.shutdown().await
+                }
+                .fuse()
+            );
+
+            loop {
+                select! {
+                    _ = socket_to_conn.as_mut() => break,
+                    _ = conn_to_socket.as_mut() => {}
+                }
+            }
 
             return Ok(());
         };
