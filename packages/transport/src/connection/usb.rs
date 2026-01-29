@@ -148,7 +148,7 @@ impl ConnectionTrait for UsbConnection {
         if !msg.payload.is_empty() {
             self.out_queue.submit(mem::take(&mut msg.payload));
 
-            if msg.header.data_length % self.packet_size as u32 == 0 {
+            if msg.header.data_length.is_multiple_of(self.packet_size as u32) {
                 self.out_queue.submit(Vec::new());
             }
         }

@@ -9,7 +9,7 @@ members = ["packages/transport"]
 [dependencies]
 adb-transport = { path = "./packages/transport" }
 
-tokio = { version = "1.43.0", features = ["macros", "rt-multi-thread", "net", "io-util", "time", "fs"] }
+tokio = { version = "1.49.0", features = ["macros", "rt-multi-thread", "net", "io-util", "time", "fs"] }
 eyre = "0.6.12"
 tracing = "0.1.41"
 tracing-subscriber = { version = "0.3.19", features = ["env-filter"] }

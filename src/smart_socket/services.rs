@@ -2,13 +2,15 @@ use crate::smart_socket::Status::Okay;
 use crate::smart_socket::devices::PickDeviceError;
 use crate::smart_socket::{BUF_SIZE, SmartSocket};
 use adb_transport::DeviceType;
-use eyre::{Context, bail};
+use eyre::{Context, bail, eyre};
 use futures::FutureExt;
 use std::pin::pin;
 use std::process;
+use time::ext::NumericalStdDuration;
 use tokio::io::{AsyncWriteExt, BufReader, split};
 use tokio::select;
-use tracing::trace;
+use tokio::time::timeout;
+use tracing::{error, trace};
 
 impl SmartSocket {
     pub(super) async fn handle_service(&mut self) -> eyre::Result<()> {
@@ -31,28 +33,45 @@ impl SmartSocket {
             let (socket_r, mut socket_w) = split(&mut socket);
             let (conn_r, mut conn_w) = split(&mut self.conn);
 
-            let mut socket_to_conn = pin!(
-                async {
-                    let mut r = BufReader::with_capacity(BUF_SIZE, socket_r);
-                    tokio::io::copy_buf(&mut r, &mut conn_w).await?;
-                    conn_w.shutdown().await
-                }
-                .fuse()
-            );
-            let mut conn_to_socket = pin!(
-                async {
-                    let mut r = BufReader::with_capacity(BUF_SIZE, conn_r);
-                    tokio::io::copy_buf(&mut r, &mut socket_w).await?;
-                    socket_w.shutdown().await
-                }
-                .fuse()
-            );
+            let mut conn_r = BufReader::with_capacity(BUF_SIZE, conn_r);
 
-            loop {
-                select! {
-                    _ = socket_to_conn.as_mut() => break,
-                    _ = conn_to_socket.as_mut() => {}
+            {
+                let mut socket_to_conn = pin!(
+                    async {
+                        let mut r = BufReader::with_capacity(BUF_SIZE, socket_r);
+                        tokio::io::copy_buf(&mut r, &mut conn_w).await?;
+                        trace!("socket_to_conn ended");
+                        conn_w.shutdown().await
+                    }
+                    .fuse()
+                );
+                let mut conn_to_socket = pin!(
+                    async {
+                        tokio::io::copy_buf(&mut conn_r, &mut socket_w).await?;
+                        trace!("conn_to_socket ended");
+                        socket_w.shutdown().await
+                    }
+                    .fuse()
+                );
+
+                loop {
+                    select! {
+                        _ = socket_to_conn.as_mut() => break,
+                        _ = conn_to_socket.as_mut() => {}
+                    }
                 }
+            }
+
+            // Try read from TCP stream to the end, otherwise it can RST when TcpStream is dropped
+            // instead of sending FIN to the `shutdown` earlier
+            // During tests simple sleep for a couple of seconds here was sufficient,
+            // but after reading about close(2), SO_LINGER and such this seems slightly more correct
+            if let Err(err) =
+                timeout(5.std_seconds(), tokio::io::copy(&mut conn_r, &mut tokio::io::sink()))
+                    .await
+                    .map_or(Err(eyre!("timeout")), |res| res.map_err(|e| eyre!(e)))
+            {
+                error!(?err, "read to end");
             }
 
             return Ok(());
