@@ -8,7 +8,7 @@ description = "Implementation of ADB transport (USB) protocol"
 [dependencies]
 tokio = { version = "1.43.0", features = ["macros", "rt-multi-thread", "sync", "time"] }
 tracing = "0.1.41"
-nusb = "0.1.12"
+nusb = "0.2.1"
 derive_more = { version = "2.0.1", features = ["error", "debug", "display", "try_from", "from"] }
 bytes = "1.10.0"
 enum_dispatch = "0.3.13"

@@ -14,7 +14,7 @@ eyre = "0.6.12"
 tracing = "0.1.41"
 tracing-subscriber = { version = "0.3.19", features = ["env-filter"] }
 tracing-appender = "0.2.3"
-nusb = "0.1.13"
+nusb = { version = "0.2.1", features = ["tokio"] }
 delegate = "0.13.2"
 derive_more = { version = "2.0.1", features = ["from"] }
 parking_lot = "0.12.3"

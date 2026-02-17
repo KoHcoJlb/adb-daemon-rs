@@ -5,6 +5,7 @@ use crate::forward::ForwardingMgr;
 use adb_transport::ErrorKind;
 use adb_transport::connection::usb::{UsbConnection, UsbError};
 use eyre::{Context, Result, eyre};
+use futures::TryFutureExt;
 use nusb::DeviceInfo;
 use std::sync::Arc;
 use tokio::spawn;
@@ -75,7 +76,9 @@ impl ConnectionMgr {
             }) = err.root_cause().downcast_ref::<Error>()
             {
                 warn!("transfer fault, reset device");
-                if let Err(err) = device.open().and_then(|d| d.reset()) {
+                if let Err(err) =
+                    device.open().into_future().and_then(|d| d.reset().into_future()).await
+                {
                     warn!(?err, "reset failed");
                 }
             }
@@ -83,7 +86,7 @@ impl ConnectionMgr {
     }
 
     pub(super) async fn refresh_usb(self: &Arc<Self>) -> Result<()> {
-        for device in nusb::list_devices().context("list devices")? {
+        for device in nusb::list_devices().await.context("list devices")? {
             let Some(serial) = device.serial_number() else {
                 continue;
             };
@@ -96,7 +99,7 @@ impl ConnectionMgr {
                 continue;
             }
 
-            let transport_conn = match UsbConnection::new(&device) {
+            let transport_conn = match UsbConnection::new(&device).await {
                 Ok(conn) => conn,
                 Err(adb_transport::Error {
                     kind: ErrorKind::Usb(UsbError::Unsupported), ..

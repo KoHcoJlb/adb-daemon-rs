@@ -3,8 +3,9 @@ use crate::error::ErrorKind;
 use crate::message::{AdbMessage, AdbMessageHeader};
 use crate::{Error, Result};
 use derive_more::Display;
-use nusb::transfer::{Direction, EndpointType, Queue, RequestBuffer, TransferError};
-use nusb::{Device, DeviceInfo};
+use nusb::descriptors::TransferType;
+use nusb::transfer::{Buffer, Bulk, Direction, In, Out, TransferError};
+use nusb::{Device, DeviceInfo, Endpoint};
 use std::mem;
 use std::task::{ready, Context, Poll};
 use tracing::{debug, info, instrument, trace, Level};
@@ -34,8 +35,8 @@ impl From<nusb::Error> for Error {
 }
 
 pub struct UsbConnection {
-    in_queue: Queue<RequestBuffer>,
-    out_queue: Queue<Vec<u8>>,
+    in_endpoint: Endpoint<Bulk, In>,
+    out_endpoint: Endpoint<Bulk, Out>,
     packet_size: usize,
 
     in_header: Option<AdbMessageHeader>,
@@ -43,7 +44,7 @@ pub struct UsbConnection {
 
 impl UsbConnection {
     #[cfg(not(windows))]
-    fn open_device(device: &DeviceInfo) -> Result<(Device, u8)> {
+    async fn open_device(device: &DeviceInfo) -> Result<(Device, u8)> {
         let iface = device
             .interfaces()
             .find(|i| {
@@ -52,7 +53,7 @@ impl UsbConnection {
                     && i.protocol() == ADB_PROTOCOL
             })
             .ok_or(UsbError::Unsupported)?;
-        Ok((device.open()?, iface.interface_number()))
+        Ok((device.open().await?, iface.interface_number()))
     }
 
     #[cfg(windows)]
@@ -76,32 +77,36 @@ impl UsbConnection {
         Ok((device, iface))
     }
 
-    pub fn new(device: &DeviceInfo) -> Result<UsbConnection> {
-        let (device, iface) = Self::open_device(device)?;
+    pub async fn new(device: &DeviceInfo) -> Result<UsbConnection> {
+        let (device, iface) = Self::open_device(device).await?;
 
-        let iface = device.claim_interface(iface).map_err(|e| (UsbError::Claim, e))?;
+        let iface = device.claim_interface(iface).await.map_err(|e| (UsbError::Claim, e))?;
 
         let iface_desc = iface.descriptors().next().ok_or((UsbError::Other, "no interface"))?;
 
         let in_ep = iface_desc
             .endpoints()
-            .find(|e| e.transfer_type() == EndpointType::Bulk && e.direction() == Direction::In)
+            .find(|e| e.transfer_type() == TransferType::Bulk && e.direction() == Direction::In)
             .ok_or((UsbError::Unsupported, "no in endpoint"))?;
         let out_ep = iface_desc
             .endpoints()
-            .find(|e| e.transfer_type() == EndpointType::Bulk && e.direction() == Direction::Out)
+            .find(|e| e.transfer_type() == TransferType::Bulk && e.direction() == Direction::Out)
             .ok_or((UsbError::Unsupported, "no out endpoint"))?;
 
         if in_ep.max_packet_size() != out_ep.max_packet_size() {
-            Err((UsbError::Other, "in packet size != out packet size"))?;
+            return Err((UsbError::Other, "in packet size != out packet size"))?;
         }
 
         let packet_size = in_ep.max_packet_size();
         debug!(packet_size);
 
+        if packet_size < AdbMessageHeader::LENGTH {
+            return Err((UsbError::Unsupported, "packet_size < header len"))?;
+        }
+
         Ok(Self {
-            in_queue: iface.bulk_in_queue(in_ep.address()).into(),
-            out_queue: iface.bulk_out_queue(out_ep.address()).into(),
+            in_endpoint: iface.endpoint(in_ep.address())?,
+            out_endpoint: iface.endpoint(out_ep.address())?,
             packet_size,
 
             in_header: None,
@@ -111,26 +116,28 @@ impl UsbConnection {
 
 impl ConnectionTrait for UsbConnection {
     fn poll_read_message(&mut self, cx: &mut Context) -> Poll<Result<AdbMessage>> {
-        if self.in_queue.pending() == 0 {
-            self.in_queue.submit(RequestBuffer::new(AdbMessageHeader::LENGTH));
+        if self.in_endpoint.pending() == 0 {
+            self.in_endpoint.submit(Buffer::new(self.packet_size));
         }
 
         loop {
-            let buf = ready!(self.in_queue.poll_next(cx))
+            let buf = ready!(self.in_endpoint.poll_next_complete(cx))
                 .into_result()
-                .map_err(|e| UsbError::Transfer(e))?;
+                .map_err(UsbError::Transfer)?;
             trace!(buf = buf.len(), header = self.in_header.is_some());
 
             if let Some(header) = self.in_header.take() {
-                return Poll::Ready(Ok(AdbMessage { header, payload: buf }));
+                return Poll::Ready(Ok(AdbMessage { header, payload: buf.into_vec() }));
             } else {
                 let header = AdbMessageHeader::read(&buf[..])?;
                 trace!(?header, "received header");
 
                 if header.data_length > 0 {
-                    self.in_queue.submit(RequestBuffer::new(header.data_length as usize));
+                    self.in_endpoint.submit(Buffer::new(
+                        (header.data_length as usize).next_multiple_of(self.packet_size),
+                    ));
                 }
-                self.in_queue.submit(RequestBuffer::reuse(buf, AdbMessageHeader::LENGTH));
+                self.in_endpoint.submit(buf);
 
                 if header.data_length == 0 {
                     return Poll::Ready(Ok(AdbMessage { header, payload: vec![] }));
@@ -141,25 +148,27 @@ impl ConnectionTrait for UsbConnection {
     }
 
     fn write_message(&mut self, mut msg: AdbMessage) -> Result<()> {
-        assert_eq!(self.out_queue.pending(), 0, "must flush before write_message");
+        assert_eq!(self.out_endpoint.pending(), 0, "must flush before write_message");
         trace!(?msg, "write message");
 
-        self.out_queue.submit(msg.header.to_vec());
+        self.out_endpoint.submit(msg.header.to_vec().into());
         if !msg.payload.is_empty() {
-            self.out_queue.submit(mem::take(&mut msg.payload));
+            self.out_endpoint.submit(mem::take(&mut msg.payload).into());
 
             if msg.header.data_length.is_multiple_of(self.packet_size as u32) {
-                self.out_queue.submit(Vec::new());
+                self.out_endpoint.submit(Buffer::new(0));
             }
         }
 
         Ok(())
     }
 
-    #[instrument(skip_all, fields(len = self.out_queue.pending()), ret(level = Level::TRACE))]
+    #[instrument(skip_all, fields(len = self.out_endpoint.pending()), ret(level = Level::TRACE))]
     fn poll_flush(&mut self, cx: &mut Context) -> Poll<Result<()>> {
-        while self.out_queue.pending() > 0 {
-            ready!(self.out_queue.poll_next(cx)).into_result().map_err(UsbError::Transfer)?;
+        while self.out_endpoint.pending() > 0 {
+            ready!(self.out_endpoint.poll_next_complete(cx))
+                .into_result()
+                .map_err(UsbError::Transfer)?;
         }
         Poll::Ready(Ok(()))
     }
