@@ -11,7 +11,7 @@ tracing = "0.1.41"
 nusb = "0.2.1"
 derive_more = { version = "2.0.1", features = ["error", "debug", "display", "try_from", "from"] }
 bytes = "1.10.0"
-enum_dispatch = "0.3.13"
+delegate = "0.13.5"
 bstr = "1.11.3"
 parking_lot = "0.12.3"
 rsa = "0.9.7"

@@ -1,4 +1,4 @@
-use crate::connection::ConnectionTrait;
+use crate::connection::Connection;
 use crate::error::ErrorKind;
 use crate::message::{AdbCommand, AdbMessage};
 use crate::transport::{ConnectionExt, TransportBackend, MAX_PAYLOAD};

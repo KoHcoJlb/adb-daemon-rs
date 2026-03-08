@@ -1,4 +1,4 @@
-use crate::connection::ConnectionTrait;
+use crate::connection::Connection;
 use crate::error::ErrorKind;
 use crate::message::{AdbMessage, AdbMessageHeader};
 use crate::{Error, Result};
@@ -114,7 +114,7 @@ impl UsbConnection {
     }
 }
 
-impl ConnectionTrait for UsbConnection {
+impl Connection for UsbConnection {
     fn poll_read_message(&mut self, cx: &mut Context) -> Poll<Result<AdbMessage>> {
         if self.in_endpoint.pending() == 0 {
             self.in_endpoint.submit(Buffer::new(self.packet_size));

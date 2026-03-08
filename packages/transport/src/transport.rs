@@ -1,6 +1,6 @@
 use crate::auth::encode_public_key;
 use crate::banner::Banner;
-use crate::connection::{Connection, ConnectionTrait};
+use crate::connection::{Connection, ConnectionEnum};
 use crate::error::ErrorKind;
 use crate::message::{AdbCommand, AdbMessage};
 use crate::socket::{Socket, SocketBackend};
@@ -41,7 +41,7 @@ impl Wake for WakerCollection {
 }
 
 struct ConnectionWrapper {
-    inner: Connection,
+    inner: ConnectionEnum,
     write_wakers: Arc<WakerCollection>,
 }
 
@@ -56,11 +56,12 @@ impl ConnectionWrapperGuard<'_> {
     }
 
     fn on_error(&mut self, err: Error) -> Error {
+        // on_error will lock the mutex to take the connection
         MutexGuard::unlocked(&mut self.inner, || self.transport.on_error(err))
     }
 }
 
-impl ConnectionTrait for ConnectionWrapperGuard<'_> {
+impl Connection for ConnectionWrapperGuard<'_> {
     fn poll_read_message(&mut self, cx: &mut Context) -> Poll<Result<AdbMessage>> {
         self.get()?.inner.poll_read_message(cx)
     }
@@ -75,6 +76,9 @@ impl ConnectionTrait for ConnectionWrapperGuard<'_> {
 
     fn poll_flush(&mut self, cx: &mut Context) -> Poll<Result<()>> {
         let inner = self.get()?;
+        // This method can potentially be called from multiple tasks (Socket.poll_read/poll_write),
+        // so using cx directly here will lead to only one of them waking up later.
+        // So, a collection is used, which can hold multiple wakers at the same time.
         inner.write_wakers.0.lock().push(cx.waker().clone());
         inner
             .inner
@@ -84,7 +88,7 @@ impl ConnectionTrait for ConnectionWrapperGuard<'_> {
 }
 
 pub trait ConnectionExt: Sized {
-    fn get_connection(&mut self) -> impl ConnectionTrait;
+    fn get_connection(&mut self) -> impl Connection;
 
     fn read_message_async(mut self) -> impl Future<Output = Result<AdbMessage>> {
         poll_fn(move |cx| self.get_connection().poll_read_message(cx))
@@ -106,8 +110,8 @@ pub trait ConnectionExt: Sized {
     }
 }
 
-impl ConnectionExt for &mut Connection {
-    fn get_connection(&mut self) -> impl ConnectionTrait {
+impl ConnectionExt for &mut ConnectionEnum {
+    fn get_connection(&mut self) -> impl Connection {
         self
     }
 }
@@ -122,8 +126,8 @@ pub(crate) struct TransportBackend {
 }
 
 impl ConnectionExt for &TransportBackend {
-    fn get_connection(&mut self) -> impl ConnectionTrait {
-        (&*self).get_connection()
+    fn get_connection(&mut self) -> impl Connection {
+        (*self).get_connection()
     }
 }
 
@@ -190,11 +194,15 @@ impl TransportBackend {
             warn!(?err, "set transport error");
             self.connection.lock().take();
             self.close_notify.notify_waiters();
-            self.sockets.retain(|_, sock| {
+
+            // Keep in mind that this function can be called from Socket.poll_read/poll_write
+            // holding SocketBackend.state mutex while handle_message can be holding DashMap waiting
+            // for that same mutex at the same time causing a deadlock here.
+            // Using non-mutable iterator here should solve the problem
+            for sock in &self.sockets {
                 sock.read_waker.notify();
                 sock.write_waker.notify();
-                false
-            });
+            }
         };
 
         ErrorKind::TransportError(err).into()
@@ -261,12 +269,12 @@ pub enum AuthMode<'a> {
 }
 
 pub struct AuthTransport {
-    conn: Connection,
+    conn: ConnectionEnum,
     last_auth: Option<AdbMessage>,
 }
 
 impl AuthTransport {
-    pub async fn new(mut conn: Connection) -> Result<Self> {
+    pub async fn new(mut conn: ConnectionEnum) -> Result<Self> {
         let cnxn =
             AdbMessage::new(AdbCommand::CNXN, VERSION, MAX_PAYLOAD, CONN_STR.as_bytes().into());
         conn.write_message_async(cnxn).await?;

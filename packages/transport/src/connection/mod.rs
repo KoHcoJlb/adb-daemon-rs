@@ -1,13 +1,13 @@
 use crate::message::AdbMessage;
 use crate::Result;
-use enum_dispatch::enum_dispatch;
+use delegate::delegate;
+use derive_more::From;
 use std::task::{Context, Poll};
 use usb::UsbConnection;
 
 pub mod usb;
 
-#[enum_dispatch]
-pub trait ConnectionTrait {
+pub trait Connection {
     fn poll_read_message(&mut self, cx: &mut Context) -> Poll<Result<AdbMessage>>;
 
     fn write_message(&mut self, msg: AdbMessage) -> Result<()>;
@@ -15,12 +15,26 @@ pub trait ConnectionTrait {
     fn poll_flush(&mut self, cx: &mut Context) -> Poll<Result<()>>;
 }
 
-#[enum_dispatch(ConnectionTrait)]
-pub enum Connection {
-    UsbConnection,
+#[derive(From)]
+pub enum ConnectionEnum {
+    UsbConnection(UsbConnection),
 }
 
-impl<C: ConnectionTrait> ConnectionTrait for &mut C {
+impl Connection for ConnectionEnum {
+    delegate! {
+        to match self {
+            ConnectionEnum::UsbConnection(c) => c,
+        } {
+            fn poll_read_message(&mut self, cx: &mut Context) -> Poll<Result<AdbMessage>>;
+
+            fn write_message(&mut self, msg: AdbMessage) -> Result<()>;
+
+            fn poll_flush(&mut self, cx: &mut Context) -> Poll<Result<()>>;
+        }
+    }
+}
+
+impl<C: Connection> Connection for &mut C {
     fn poll_read_message(&mut self, cx: &mut Context) -> Poll<Result<AdbMessage>> {
         (*self).poll_read_message(cx)
     }
