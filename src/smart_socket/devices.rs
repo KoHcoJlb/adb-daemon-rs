@@ -1,6 +1,6 @@
 use crate::connection::types::WeakConnection;
+use crate::smart_socket::SmartSocket;
 use crate::smart_socket::Status::Okay;
-use crate::smart_socket::{DeviceSelector, SmartSocket};
 use adb_transport::Banner;
 use derive_more::{Display, Error};
 use eyre::Result;
@@ -9,6 +9,14 @@ use std::fmt::Write;
 use std::sync::Arc;
 use tokio::io::AsyncWriteExt;
 use tracing::{Span, trace};
+
+#[derive(Debug, Clone)]
+pub(super) enum DeviceSelector {
+    Connection(Arc<WeakConnection>),
+    Serial(String),
+    Any,
+    None,
+}
 
 #[derive(Debug, Display, Error)]
 pub enum PickDeviceError {
@@ -24,22 +32,21 @@ pub enum PickDeviceError {
 
 impl SmartSocket {
     pub fn pick_connection(&mut self) -> Result<Arc<WeakConnection>, PickDeviceError> {
-        use crate::smart_socket::DeviceSelector::*;
+        use DeviceSelector::*;
 
         let connections = &self.daemon.connections;
         let conn = match &self.device {
             Connection(conn) => return Ok(conn.clone()),
-            Serial(serial) => connections
-                .get(serial)
-                .ok_or(PickDeviceError::NotFound(serial.clone()))?
-                .downgrade(),
+            Serial(serial) => {
+                connections.get(serial).ok_or(PickDeviceError::NotFound(serial.clone()))?
+            }
             Any => {
                 let mut iter = connections.iter();
                 let conn = iter.next().ok_or(PickDeviceError::NoDevices)?;
                 if iter.next().is_some() {
                     return Err(PickDeviceError::MoreThanOne);
                 }
-                conn.downgrade()
+                conn
             }
             None => Err(PickDeviceError::NotSelected)?,
         };
@@ -91,8 +98,6 @@ impl SmartSocket {
         let mut s = String::new();
         for device in self.daemon.connections.iter() {
             if long {
-                let banner = device.backend.banner()?;
-
                 write!(s, "{:22}	{} {}", device.serial, device.banner.device_type, device.id)?;
 
                 for (name, key) in [
@@ -100,7 +105,8 @@ impl SmartSocket {
                     ("model", Banner::PRODUCT_MODEL),
                     ("device", Banner::PRODUCT_DEVICE),
                 ] {
-                    let value = banner
+                    let value = device
+                        .banner
                         .getprop(key)
                         .unwrap_or("Unknown")
                         .replace(|c: char| !c.is_ascii_alphanumeric(), "_");
@@ -109,7 +115,7 @@ impl SmartSocket {
 
                 writeln!(s, " transport_id:{}", device.id)?;
             } else {
-                writeln!(s, "{}	{}", device.key(), device.banner.device_type)?;
+                writeln!(s, "{}	{}", device.serial, device.banner.device_type)?;
             }
         }
         Ok(s)

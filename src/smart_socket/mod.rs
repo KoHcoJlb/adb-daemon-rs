@@ -1,8 +1,8 @@
 mod devices;
 mod services;
 
-use crate::connection::types::WeakConnection;
 use crate::daemon::AdbDaemon;
+use crate::smart_socket::devices::DeviceSelector;
 use crate::util::{read_protocol_string, write_protocol_string};
 use Status::*;
 use eyre::{Report, Result, bail};
@@ -63,14 +63,6 @@ impl SmartSocket {
     }
 }
 
-#[derive(Debug, Clone)]
-enum DeviceSelector {
-    Connection(Arc<WeakConnection>),
-    Serial(String),
-    Any,
-    None,
-}
-
 impl SmartSocket {
     async fn wait_for<T, E>(
         &mut self, event: impl Future<Output = Result<T, E>>,
@@ -80,7 +72,6 @@ impl SmartSocket {
     {
         let mut buf = [0];
         select! {
-            // res = event => res.map(Some).map_err(|e| e.into()),
             res = event => Ok(Some(res?)),
             res = self.conn.read(&mut buf) => {
                 if res? == 0 {
@@ -101,10 +92,10 @@ impl SmartSocket {
         let mut this = SmartSocket { daemon, conn: socket, device: DeviceSelector::None };
 
         if let Err(err) = this.handle_service().await {
-            if let Some(err) = err.downcast_ref::<io::Error>() {
-                if err.kind() == io::ErrorKind::UnexpectedEof {
-                    return;
-                }
+            if let Some(err) = err.downcast_ref::<io::Error>()
+                && err.kind() == io::ErrorKind::UnexpectedEof
+            {
+                return;
             }
 
             error!(?err, "handle connection");

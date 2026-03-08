@@ -2,8 +2,6 @@ use crate::config::config;
 use crate::connection::types::{Connection, ConnectionBackend, MaybeConnection, WeakConnection};
 use crate::forward::ForwardingMgr;
 use dashmap::DashMap;
-use dashmap::mapref::multiple::RefMulti;
-use dashmap::mapref::one::Ref;
 use eyre::{Result, WrapErr};
 use futures::StreamExt;
 use rsa::RsaPrivateKey;
@@ -48,12 +46,12 @@ impl ConnectionMgr {
         }
     }
 
-    pub fn get(&self, serial: &str) -> Option<Ref<'_, String, Arc<Connection>>> {
-        self.by_serial.get(serial).filter(|c| connection_filter(c))
+    pub fn get(&self, serial: &str) -> Option<Arc<WeakConnection>> {
+        self.by_serial.get(serial).filter(|c| connection_filter(c)).map(|c| c.downgrade())
     }
 
-    pub fn iter(&self) -> impl Iterator<Item = RefMulti<'_, String, Arc<Connection>>> {
-        self.by_serial.iter().filter(|c| connection_filter(c))
+    pub fn iter(&self) -> impl Iterator<Item = Arc<WeakConnection>> {
+        self.by_serial.iter().filter(|c| connection_filter(c)).map(|c| c.downgrade())
     }
 
     pub fn device_updates(&self) -> broadcast::Receiver<DeviceUpdate> {
