@@ -13,6 +13,10 @@ use clap::{Args, Parser, Subcommand};
 use eyre::{Result, WrapErr, bail};
 use std::fmt::{Debug, Formatter};
 
+#[cfg(target_os = "linux")]
+#[global_allocator]
+static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
+
 struct EyreHandler;
 
 impl eyre::EyreHandler for EyreHandler {

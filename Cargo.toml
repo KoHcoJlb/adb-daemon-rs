@@ -34,3 +34,10 @@ nix = { version = "0.29.0", features = ["process", "fs"] }
 
 [target."cfg(windows)".dependencies]
 windows = { version = "0.61.1", features = ["Win32_Security", "Win32_Storage_FileSystem", "Win32_System_Console"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+tikv-jemallocator = "0.6.1"
+
+[profile.release]
+lto = true
+codegen-units = 1

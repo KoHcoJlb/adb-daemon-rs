@@ -15,7 +15,11 @@
         in
         {
           default = pkgs.callPackage (
-            { rust, stdenv }:
+            {
+              rust,
+              stdenv,
+              craneArgs ? { },
+            }:
 
             craneLib.buildPackage (
               {
@@ -43,6 +47,7 @@
                   "HOST_CXX" = cxxForBuild;
                 }
               )
+              // craneArgs
             )
           ) { };
         };
