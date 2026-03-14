@@ -115,6 +115,7 @@ impl UsbConnection {
 }
 
 impl Connection for UsbConnection {
+    #[instrument(skip_all, fields(len = self.in_endpoint.pending(), header = self.in_header.is_some()), ret(level = Level::TRACE))]
     fn poll_read_message(&mut self, cx: &mut Context) -> Poll<Result<AdbMessage>> {
         if self.in_endpoint.pending() == 0 {
             self.in_endpoint.submit(Buffer::new(self.packet_size));
