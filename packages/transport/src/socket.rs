@@ -29,8 +29,8 @@ pub(crate) struct State {
 
     read_buffer: VecDeque<Cursor<Vec<u8>>>,
 
-    initial_acknowledgment: isize,
-    acknowledged: isize,
+    initial_acknowledgment: usize,
+    acknowledged: usize,
     write_throttle: Interval,
 }
 
@@ -90,14 +90,14 @@ impl SocketBackend {
                 );
 
                 if state.remote_id == 0 {
-                    state.initial_acknowledgment = avail as isize;
+                    state.initial_acknowledgment = avail as usize;
                     state.remote_id = msg.header.arg0;
 
                     self.span.record("remote_id", state.remote_id);
                 }
 
                 debug!(acknowledged = state.acknowledged, avail);
-                state.acknowledged += avail as isize;
+                state.acknowledged += avail as usize;
 
                 self.write_waker.notify();
             }
@@ -166,8 +166,8 @@ impl Socket {
 
                     read_buffer: VecDeque::new(),
 
-                    initial_acknowledgment: acknowledged as isize,
-                    acknowledged: acknowledged as isize,
+                    initial_acknowledgment: acknowledged,
+                    acknowledged,
                     write_throttle: interval(Duration::from_millis(10)),
                 }
                 .into(),
@@ -255,20 +255,17 @@ impl AsyncWrite for Socket {
         let mut conn = self.inner.transport.get_connection();
         ready!(conn.poll_flush(cx)).map_err(io_error)?;
 
-        if state.acknowledged <= -state.initial_acknowledgment {
+        if state.acknowledged == 0 {
             return Poll::Pending;
         }
 
-        if state.acknowledged <= 0 {
+        if state.acknowledged <= state.initial_acknowledgment / 2 {
             ready!(state.write_throttle.poll_tick(cx));
         }
 
-        let len = buf
-            .len()
-            .min((state.acknowledged + state.initial_acknowledgment) as usize)
-            .min(MAX_PAYLOAD as usize);
+        let len = buf.len().min(state.acknowledged).min(MAX_PAYLOAD as usize);
 
-        state.acknowledged -= len as isize;
+        state.acknowledged = state.acknowledged.strict_sub(len);
         debug!(write = len, acknowledged = state.acknowledged);
 
         conn.write_message(AdbMessage::new(
