@@ -51,6 +51,7 @@ impl SmartSocket {
             None => Err(PickDeviceError::NotSelected)?,
         };
         self.device = Connection(conn.clone());
+        Span::current().record("conn_id", &conn.id);
         Span::current().record("serial", &conn.serial);
         Ok(conn)
     }

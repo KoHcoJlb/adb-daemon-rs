@@ -84,10 +84,10 @@ impl SmartSocket {
         }
     }
 
-    #[instrument(name = "smart_socket", skip_all, fields(id, serial))]
+    #[instrument(name = "smart_socket", skip_all, fields(id, conn_id, serial))]
     pub async fn run(daemon: Arc<AdbDaemon>, socket: TcpStream) {
-        static CONN_ID: AtomicU32 = AtomicU32::new(0);
-        Span::current().record("id", CONN_ID.fetch_add(1, Ordering::SeqCst));
+        static SOCKET_ID: AtomicU32 = AtomicU32::new(0);
+        Span::current().record("id", SOCKET_ID.fetch_add(1, Ordering::SeqCst));
 
         let mut this = SmartSocket { daemon, conn: socket, device: DeviceSelector::None };
 
