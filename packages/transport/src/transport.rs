@@ -135,6 +135,7 @@ impl TransportBackend {
     async fn handle_message(self: &Arc<Self>, pending: &Sender<PendingSocket>) -> Result<()> {
         self.check_error()?;
 
+        trace!("reading message");
         let mut msg = select! {
             msg = self.read_message_async() => msg?,
             _ = self.close_notify.notified() => return Ok(()),
@@ -203,6 +204,7 @@ impl TransportBackend {
                 sock.read_waker.notify();
                 sock.write_waker.notify();
             }
+            trace!("notified all waiters");
         };
 
         ErrorKind::TransportError(err).into()
