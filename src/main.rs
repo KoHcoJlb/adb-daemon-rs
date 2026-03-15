@@ -56,7 +56,7 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
     let cmd = cli.cmd.unwrap_or(Command::Server(ServerArgs { fd: None, daemon: false }));
 
-    let _guard = log::init(matches!(cmd, Command::Server(_)));
+    log::init(matches!(cmd, Command::Server(_)));
     // debug!(?cli);
 
     match cmd {

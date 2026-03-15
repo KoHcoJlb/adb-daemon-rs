@@ -8,7 +8,7 @@ use nusb::transfer::{Buffer, Bulk, Direction, In, Out, TransferError};
 use nusb::{Device, DeviceInfo, Endpoint};
 use std::mem;
 use std::task::{ready, Context, Poll};
-use tracing::{debug, info, instrument, trace, Level};
+use tracing::{info, instrument, trace, Level};
 
 const ADB_CLASS: u8 = 0xff;
 const ADB_SUBCLASS: u8 = 0x42;
@@ -98,8 +98,6 @@ impl UsbConnection {
         }
 
         let packet_size = in_ep.max_packet_size();
-        debug!(packet_size);
-
         if packet_size < AdbMessageHeader::LENGTH {
             return Err((UsbError::Unsupported, "packet_size < header len"))?;
         }

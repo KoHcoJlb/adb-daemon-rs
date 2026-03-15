@@ -18,7 +18,7 @@ use std::sync::{Arc, OnceLock};
 use std::task::{ready, Context, Poll, Wake, Waker};
 use tokio::select;
 use tokio::sync::Notify;
-use tracing::{debug, error, info, trace, warn, Instrument, Span};
+use tracing::{debug, error, info, trace, Instrument, Span};
 
 pub(crate) const DELAYED_ACK_BYTES: u32 = 32 * 1024 * 1024;
 pub(crate) const MAX_PAYLOAD: u32 = 1024 * 1024;
@@ -191,7 +191,7 @@ impl TransportBackend {
         let err = Arc::new(err);
 
         if self.error.set(err.clone()).is_ok() {
-            warn!(?err, "set transport error");
+            debug!(?err, "set transport error");
             self.connection.lock().take();
             self.close_notify.notify_waiters();
 
@@ -223,7 +223,7 @@ impl TransportBackend {
 
 impl Drop for TransportBackend {
     fn drop(&mut self) {
-        info!("dropped transport backend");
+        debug!("dropped transport backend");
     }
 }
 
@@ -438,6 +438,6 @@ impl Transport {
 
 impl Drop for Transport {
     fn drop(&mut self) {
-        info!("dropped transport")
+        debug!("dropped transport")
     }
 }
