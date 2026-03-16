@@ -67,7 +67,6 @@ impl Connection for ConnectionWrapperGuard<'_> {
     }
 
     fn write_message(&mut self, msg: AdbMessage) -> Result<()> {
-        trace!(?msg, "write message");
         self.get()?
             .inner
             .write_message(msg)

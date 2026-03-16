@@ -10,7 +10,7 @@ use time::ext::NumericalStdDuration;
 use tokio::io::{AsyncWriteExt, BufReader, split};
 use tokio::select;
 use tokio::time::timeout;
-use tracing::{error, trace};
+use tracing::{error, trace, warn};
 
 impl SmartSocket {
     pub(super) async fn handle_service(&mut self) -> eyre::Result<()> {
@@ -39,17 +39,21 @@ impl SmartSocket {
                 let mut socket_to_conn = pin!(
                     async {
                         let mut r = BufReader::with_capacity(BUF_SIZE, socket_r);
-                        tokio::io::copy_buf(&mut r, &mut conn_w).await?;
-                        trace!("socket_to_conn ended");
-                        conn_w.shutdown().await
+                        let res = tokio::io::copy_buf(&mut r, &mut conn_w).await;
+                        trace!(?res, "socket_to_conn ended");
+                        if let Err(err) = conn_w.shutdown().await {
+                            warn!(?err, "shutdown conn");
+                        }
                     }
                     .fuse()
                 );
                 let mut conn_to_socket = pin!(
                     async {
-                        tokio::io::copy_buf(&mut conn_r, &mut socket_w).await?;
-                        trace!("conn_to_socket ended");
-                        socket_w.shutdown().await
+                        let res = tokio::io::copy_buf(&mut conn_r, &mut socket_w).await;
+                        trace!(?res, "conn_to_socket ended");
+                        if let Err(err) = socket_w.shutdown().await {
+                            warn!(?err, "shutdown socket");
+                        }
                     }
                     .fuse()
                 );
