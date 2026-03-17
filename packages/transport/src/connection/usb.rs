@@ -8,7 +8,9 @@ use nusb::transfer::{Buffer, Bulk, Direction, In, Out, TransferError};
 use nusb::{Device, DeviceInfo, Endpoint};
 use std::mem;
 use std::task::{ready, Context, Poll};
-use tracing::{info, instrument, trace, Level};
+use std::time::Duration;
+use tokio::time::{interval, Interval, MissedTickBehavior};
+use tracing::{info, instrument, trace, warn, Level};
 
 const ADB_CLASS: u8 = 0xff;
 const ADB_SUBCLASS: u8 = 0x42;
@@ -40,6 +42,7 @@ pub struct UsbConnection {
     packet_size: usize,
 
     in_header: Option<AdbMessageHeader>,
+    in_timeout: Interval,
 }
 
 impl UsbConnection {
@@ -102,28 +105,49 @@ impl UsbConnection {
             return Err((UsbError::Unsupported, "packet_size < header len"))?;
         }
 
+        let mut in_timeout = interval(Duration::from_secs(10));
+        in_timeout.set_missed_tick_behavior(MissedTickBehavior::Delay);
         Ok(Self {
             in_endpoint: iface.endpoint(in_ep.address())?,
             out_endpoint: iface.endpoint(out_ep.address())?,
             packet_size,
 
             in_header: None,
+            in_timeout,
         })
     }
 }
 
 impl Connection for UsbConnection {
-    #[instrument(skip_all, fields(len = self.in_endpoint.pending(), header = self.in_header.is_some()), ret(level = Level::TRACE))]
+    #[instrument(skip_all, fields(len = self.in_endpoint.pending(), header = self.in_header.is_some()
+    ), ret(level = Level::TRACE))]
     fn poll_read_message(&mut self, cx: &mut Context) -> Poll<Result<AdbMessage>> {
         if self.in_endpoint.pending() == 0 {
             self.in_endpoint.submit(Buffer::new(self.packet_size));
+            self.in_timeout.reset();
         }
 
         loop {
+            // Weird thing, observed on Raspberry pi 4, usb read (poll_next_complete) can get stuck
+            // while device is still responsive, writes are working
+            // Operation can be resumed from this state by calling `poll_next_complete` again,
+            // hence this hack with timeout to observe and somehow mitigate these things
+            let timeout = self.in_timeout.poll_tick(cx).is_ready();
+            if timeout {
+                trace!("timeout");
+                let _ = self.in_timeout.poll_tick(cx);
+            }
+
             let buf = ready!(self.in_endpoint.poll_next_complete(cx))
                 .into_result()
                 .map_err(UsbError::Transfer)?;
             trace!(buf = buf.len(), header = self.in_header.is_some());
+
+            if timeout {
+                warn!("unstuck after timeout");
+            }
+
+            self.in_timeout.reset();
 
             if let Some(header) = self.in_header.take() {
                 return Poll::Ready(Ok(AdbMessage { header, payload: buf.into_vec() }));
