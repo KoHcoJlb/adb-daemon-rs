@@ -17,7 +17,8 @@ use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::spawn;
 use tokio::time::{interval, Interval};
 use tracing::span::EnteredSpan;
-use tracing::{debug, info, info_span, warn, Span};
+use tracing::Level;
+use tracing::{debug, info_span, instrument, trace, warn, Span};
 
 fn io_error(cause: impl Into<Error>) -> io::Error {
     io::Error::new(io::ErrorKind::BrokenPipe, cause.into())
@@ -188,10 +189,10 @@ impl Drop for Socket {
 }
 
 impl AsyncRead for Socket {
+    #[instrument(parent = &self.inner.span, name = "s_poll_read", level = Level::TRACE, skip_all, ret)]
     fn poll_read(
         mut self: Pin<&mut Self>, cx: &mut Context<'_>, buf: &mut ReadBuf<'_>,
     ) -> Poll<io::Result<()>> {
-        let _span = self.inner.enter_span();
         self.read_waker.register(cx.waker());
 
         self.inner.check_transport_error()?;
@@ -220,6 +221,7 @@ impl AsyncRead for Socket {
 
         let filled = buf.filled().len() - filled;
         if filled == 0 {
+            trace!(filled);
             return Poll::Pending;
         }
 
@@ -238,15 +240,16 @@ impl AsyncRead for Socket {
 }
 
 impl AsyncWrite for Socket {
+    #[instrument(parent = &self.inner.span, name = "s_poll_write", level = Level::TRACE, skip_all, fields(acknowledged), ret)]
     fn poll_write(
         mut self: Pin<&mut Self>, cx: &mut Context<'_>, buf: &[u8],
     ) -> Poll<io::Result<usize>> {
-        let _span = self.inner.enter_span();
         self.write_waker.register(cx.waker());
 
         self.inner.check_transport_error()?;
 
         let mut state = self.inner.state.lock();
+        Span::current().record("acknowledged", state.acknowledged);
 
         if state.closed {
             Err(io_error(ErrorKind::Closed))?;
@@ -279,8 +282,8 @@ impl AsyncWrite for Socket {
         Poll::Ready(Ok(len))
     }
 
+    #[instrument(parent = &self.inner.span, name = "s_poll_flush", level = Level::TRACE, skip_all, ret)]
     fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        let _span = self.inner.enter_span();
         self.write_waker.register(cx.waker());
 
         self.inner.check_transport_error()?;
@@ -299,9 +302,9 @@ impl AsyncWrite for Socket {
         }
     }
 
+    #[instrument(parent = &self.inner.span, name = "s_poll_shutdown", level = Level::TRACE, skip_all, ret)]
     fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         let _span = self.inner.enter_span();
-        info!("shutdown");
 
         ready!(self.as_mut().poll_flush(cx))?;
 
@@ -310,7 +313,6 @@ impl AsyncWrite for Socket {
             conn.write_message(msg).map_err(io_error)?; // relies on self.poll_flush flushing connection
             conn.poll_flush(cx).map_err(io_error)
         } else {
-            debug!("shutdown completed");
             Poll::Ready(Ok(()))
         }
     }
