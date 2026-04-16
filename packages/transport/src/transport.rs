@@ -361,12 +361,6 @@ pub struct Transport {
 }
 
 impl Transport {
-    fn check_error(&self) -> Result<()> {
-        self.inner.check_error()
-    }
-}
-
-impl Transport {
     pub fn close(&self) {
         self.inner.on_error(ErrorKind::Closed.into());
     }
@@ -380,7 +374,7 @@ impl Transport {
     }
 
     pub async fn open_socket(&self, service: &str) -> Result<Socket> {
-        self.check_error()?;
+        self.inner.check_error()?;
 
         info!(socket_count = self.inner.sockets.len());
 
@@ -403,9 +397,8 @@ impl Transport {
             .await?;
 
         let remote_id = poll_fn::<Result<_>, _>(|cx| {
-            self.check_error()?;
-
             socket.write_waker.register(cx.waker());
+            self.inner.check_error()?;
 
             let state = socket.inner.state.lock();
             if state.remote_id != 0 {
