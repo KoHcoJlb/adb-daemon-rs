@@ -17,9 +17,13 @@ async fn accept_sockets_task(connection: Arc<WeakConnection>, forwarding_mgr: Ar
             let Ok(conn) = connection.upgrade() else {
                 return;
             };
-            let ConnectionBackend::AProto(transport) = &conn.backend;
+            let sock = match &conn.backend {
+                ConnectionBackend::AProto(transport) => transport.accept_socket().await,
+                #[cfg(test)]
+                ConnectionBackend::Test { .. } => unreachable!("expected USB transport"),
+            };
 
-            match transport.accept_socket().await {
+            match sock {
                 Ok(s) => s,
                 Err(err) => {
                     warn!(?err, "accept socket");

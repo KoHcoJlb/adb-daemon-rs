@@ -4,7 +4,7 @@
 
 - The workspace contains the `adb-daemon-rs` binary (Rust 2024) and `adb-transport` library (Rust 2021). Root Cargo commands select only the binary by default; use `--workspace` to include library test targets.
 - Run `cargo check --workspace --all-targets --locked`, `cargo clippy --workspace --all-targets --locked`, and `cargo fmt --all -- --check` from the root. Formatting is configured in `rustfmt.toml`.
-- There are currently no automated tests or fixtures. Use `cargo test --workspace --locked` when adding tests; append a test-name filter for focused execution. Passing Cargo checks does not exercise USB/device behavior.
+- Run `cargo test --workspace --locked`; append a test-name filter for focused execution. Forwarding regression tests in `src/connection/forward_tests.rs` exercise smart-socket framing and loopback TCP forwarding with a test-only device backend. These tests and Cargo checks do not exercise USB/device behavior.
 - Prefer workspace verification for transport changes: the root manifest enables `nusb`'s `tokio` feature, while `packages/transport/Cargo.toml` does not.
 - The root `Cargo.lock` governs workspace builds; the separately tracked `packages/transport/Cargo.lock` is not the workspace lockfile.
 - `justfile` only lists recipes and optionally imports ignored `local.just`; local build/deploy recipes are machine-specific. `flake.nix` exposes `overlays.default`, with no standalone package or development-shell output.

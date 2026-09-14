@@ -17,12 +17,16 @@ use tracing::{Span, debug, info_span};
 #[derive(From)]
 pub enum Socket {
     AProto(adb_transport::Socket),
+    #[cfg(test)]
+    Test(tokio::io::DuplexStream),
 }
 
 impl AsyncRead for Socket {
     delegate! {
         to match self.get_mut() {
             Socket::AProto(s) => Pin::new(s),
+            #[cfg(test)]
+            Socket::Test(s) => Pin::new(s),
         } {
             fn poll_read(
                 self: Pin<&mut Self>,
@@ -37,6 +41,8 @@ impl AsyncWrite for Socket {
     delegate! {
         to match self.get_mut() {
             Socket::AProto(s) => Pin::new(s),
+            #[cfg(test)]
+            Socket::Test(s) => Pin::new(s),
         } {
             fn poll_write(
                 self: Pin<&mut Self>,
@@ -77,30 +83,47 @@ impl PendingSocket {
 
 pub enum ConnectionBackend {
     AProto(adb_transport::Transport),
+    #[cfg(test)]
+    Test {
+        banner: Banner,
+        opened: tokio::sync::mpsc::UnboundedSender<(String, tokio::io::DuplexStream)>,
+    },
 }
 
 impl ConnectionBackend {
     pub fn close(&self) {
         match self {
             ConnectionBackend::AProto(c) => c.close(),
+            #[cfg(test)]
+            ConnectionBackend::Test { .. } => {}
         }
     }
 
     pub fn is_closed(&self) -> bool {
         match self {
             ConnectionBackend::AProto(t) => t.is_closed(),
+            #[cfg(test)]
+            ConnectionBackend::Test { opened, .. } => opened.is_closed(),
         }
     }
 
     pub fn banner(&self) -> Result<&Banner> {
         match self {
             ConnectionBackend::AProto(t) => Ok(t.banner()),
+            #[cfg(test)]
+            ConnectionBackend::Test { banner, .. } => Ok(banner),
         }
     }
 
     pub async fn open_socket(&self, service: &str) -> Result<Socket> {
         Ok(match self {
             ConnectionBackend::AProto(conn) => conn.open_socket(service).await?.into(),
+            #[cfg(test)]
+            ConnectionBackend::Test { opened, .. } => {
+                let (socket, peer) = tokio::io::duplex(1024);
+                opened.send((service.into(), peer))?;
+                Socket::Test(socket)
+            }
         })
     }
 }

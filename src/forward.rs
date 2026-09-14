@@ -5,7 +5,6 @@ use derive_more::Display;
 use eyre::{OptionExt, Result, WrapErr, bail, ensure};
 use parking_lot::RwLock;
 use std::collections::HashMap;
-use std::collections::hash_map::Entry;
 use std::fmt::Write;
 use std::net::{IpAddr, SocketAddr};
 use std::str::FromStr;
@@ -149,6 +148,8 @@ impl ForwardingMgr {
             return Ok(false);
         };
 
+        let mut allocated_port = None;
+
         match cmd {
             ForwardCommand::Add { left: local, right: remote, norebind } => {
                 self.clean_forwards().await;
@@ -159,31 +160,39 @@ impl ForwardingMgr {
 
                 let conn = socket.pick_connection()?;
 
-                match self.listeners.write().await.entry(local.clone()) {
-                    Entry::Occupied(entry) => {
-                        ensure!(!norebind, "already bound");
+                let mut listeners = self.listeners.write().await;
+                if port != 0
+                    && let Some(forward) = listeners.get_mut(&local)
+                {
+                    ensure!(!norebind, "already bound");
 
-                        info!(%local, %remote, "changed forward");
-                        *entry.get().target.write() = Forward { conn, remote }
+                    info!(%local, %remote, "changed forward");
+                    *forward.target.write() = Forward { conn, remote };
+                } else {
+                    let listener =
+                        TcpListener::bind(SocketAddr::new(config().listen_address().ip(), port))
+                            .await
+                            .context("bind")?;
+
+                    let bound_port = listener.local_addr().context("local address")?.port();
+                    let local = Proto::Tcp(bound_port);
+                    if port == 0 {
+                        allocated_port = Some(bound_port);
                     }
-                    Entry::Vacant(entry) => {
-                        let listener = TcpListener::bind(SocketAddr::new(
-                            config().listen_address().ip(),
-                            port,
-                        ))
-                        .await
-                        .context("bind")?;
 
-                        info!(%local, %remote, "added forward");
-                        let span = info_span!(parent: None, "forward", %local, %remote, serial = conn.serial);
+                    info!(%local, %remote, "added forward");
+                    let span =
+                        info_span!(parent: None, "forward", %local, %remote, serial = conn.serial);
 
-                        let forward = Arc::new(RwLock::new(Forward { conn, remote }));
-                        entry.insert(ForwardTask {
+                    let forward = Arc::new(RwLock::new(Forward { conn, remote }));
+                    listeners.insert(
+                        local,
+                        ForwardTask {
                             task: spawn(forward_task(listener, forward.clone()).instrument(span)),
                             target: forward,
-                        });
-                    }
-                };
+                        },
+                    );
+                }
             }
             ForwardCommand::Remove(proto) => {
                 self.clean_forwards().await;
@@ -210,6 +219,10 @@ impl ForwardingMgr {
 
         socket.respond(Status::Okay).await?;
         socket.respond(Status::Okay).await?;
+        if let Some(port) = allocated_port {
+            socket.write_pstring(port.to_string()).await?;
+        }
+
         Ok(true)
     }
 

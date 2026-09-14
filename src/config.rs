@@ -51,6 +51,14 @@ impl Config {
 
 static CONFIG: OnceLock<Config> = OnceLock::new();
 
+#[cfg(test)]
+pub(crate) fn init_test_config() {
+    CONFIG.get_or_init(|| Config {
+        listen_address: Some((Ipv4Addr::LOCALHOST, 0).into()),
+        ..Default::default()
+    });
+}
+
 pub fn load_config() -> Result<()> {
     let path = env::var("ADB_DAEMON_CONFIG")
         .map(Utf8PathBuf::from)
